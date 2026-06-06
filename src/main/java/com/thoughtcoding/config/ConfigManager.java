@@ -13,7 +13,9 @@ import java.nio.file.Paths;
  * 配置管理单例类，负责加载和提供应用配置
  */
 public class ConfigManager {
-    private static ConfigManager instance;
+    // 饥汉式单例 —— 线程安全，避免并发下出现多个实例
+    private static final ConfigManager INSTANCE = new ConfigManager();
+
     private AppConfig appConfig;
     private MCPConfig mcpConfig;
     private MCPService mcpService; // 添加 MCP 服务引用
@@ -23,10 +25,7 @@ public class ConfigManager {
     }
 
     public static ConfigManager getInstance() {
-        if (instance == null) {
-            instance = new ConfigManager();
-        }
-        return instance;
+        return INSTANCE;
     }
 
     // 无 MCPService 的初始化方法

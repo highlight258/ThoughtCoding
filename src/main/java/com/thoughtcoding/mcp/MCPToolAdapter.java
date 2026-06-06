@@ -1,9 +1,9 @@
 package com.thoughtcoding.mcp;
 
 import com.thoughtcoding.mcp.model.MCPTool;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thoughtcoding.model.ToolResult;
 import com.thoughtcoding.tools.BaseTool;
-import com.thoughtcoding.model.ToolResult;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.HashMap;
@@ -14,12 +14,13 @@ import java.util.Map;
  */
 public class MCPToolAdapter extends BaseTool {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(MCPToolAdapter.class);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private final MCPTool mcpTool;
     private final MCPClient mcpClient;
 
     // 构造函数
     public MCPToolAdapter(MCPTool mcpTool, MCPClient mcpClient) {
-        super("mcp:" + mcpClient.getServerName() + "/" + mcpTool.getName(),
+        super(mcpTool.getName(),
                 mcpTool.getDescription());
         this.mcpTool = mcpTool;
         this.mcpClient = mcpClient;
@@ -68,8 +69,8 @@ public class MCPToolAdapter extends BaseTool {
         // 尝试解析JSON
         if (input.trim().startsWith("{")) {
             try {
-                com.fasterxml.jackson.databind.ObjectMapper mapper =
-                    new com.fasterxml.jackson.databind.ObjectMapper();
+                ObjectMapper mapper =
+                    OBJECT_MAPPER;
                 return mapper.readValue(input, Map.class);
             } catch (Exception e) {
                 log.debug("输入不是有效JSON，使用默认解析: {}", e.getMessage());

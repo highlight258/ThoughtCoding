@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -29,7 +30,25 @@ public class LangChainService implements AIService {
     // 用于跟踪生成状态
     private volatile boolean isGenerating = false;
     private volatile boolean shouldStop = false;
-    private boolean hasTriggeredToolCall = false;
+    private volatile boolean hasTriggeredToolCall = false;
+
+    // 预编译正则 —— 避免每次 AI 响应时重复编译
+    private static final Pattern WRITE_FILE_NAME_PATTERN = Pattern.compile("write_file\\s+\"([^\"]+)\"");
+    private static final Pattern WRITE_FILE_CONTENT_PATTERN = Pattern.compile(
+        "write_file\\s+\"[^\"]+\"\\s+\"((?:[^\"\\\\]|\\\\.)*)\"");
+    private static final Pattern JAVA_FILE_PATTERN = Pattern.compile("([\\w/]+\\.java)");
+    private static final Pattern FILE_NAME_KEYWORD_PATTERN = Pattern.compile(
+        "(?:文件名|filename|file name)\\s*[:：]?\\s*([\\w/]+\\.\\w+)",
+        Pattern.CASE_INSENSITIVE);
+    private static final Pattern ANY_CODE_FILE_PATTERN = Pattern.compile("([\\w/]+\\.(?:java|py|js|ts|cpp|c|h))");
+    private static final Pattern CODE_BLOCK_PATTERN = Pattern.compile("```(?:java)?\\s*\\n([\\s\\S]*?)\\n```");
+    private static final Pattern CLASS_BODY_PATTERN = Pattern.compile(
+        "(?:public\\s+)?class\\s+\\w+\\s*\\{[\\s\\S]*?\\n\\}");
+    private static final Pattern WRITE_FILE_CLEANUP_PATTERN = Pattern.compile("\\s*write_file\\s+\"[^\"]+\"[\\s\\S]*");
+    private static final Pattern CODE_LANG_TOKEN_PATTERN = Pattern.compile(
+        "^(java|python|javascript|cpp|c|python3|js|ts)\\s*$", Pattern.MULTILINE);
+    private static final Pattern CODE_LANG_PREFIX_PATTERN = Pattern.compile(
+        "^\\s*(java|python|javascript|cpp|c|python3|js|ts)\\s*\n");
 
     public LangChainService(AppConfig appConfig, ToolRegistry toolRegistry, ContextManager contextManager) {
         this.appConfig = appConfig;
@@ -62,7 +81,7 @@ public class LangChainService implements AIService {
 
     @Override
     public List<ChatMessage> chat(String input, List<ChatMessage> history, String modelName) {
-        throw new UnsupportedOperationException("Use streamingChat for real AI service");
+        return streamingChat(input, history, modelName);
     }
 
     @Override
@@ -140,7 +159,7 @@ public class LangChainService implements AIService {
                         if (confirmationDisplayed && codeBlockCount >= 2) {
                             String cleanCode = codeBuffer.toString();
                             // 移除语言标记（如 "java"、"python"）
-                            cleanCode = cleanCode.replaceFirst("^\\s*(java|python|javascript|cpp|c|python3|js|ts)\\s*\n", "");
+                            cleanCode = CODE_LANG_PREFIX_PATTERN.matcher(cleanCode).replaceFirst("");
 
                             triggerToolCallWithCode(detectedFileName, cleanCode.trim());
                             hasTriggeredToolCall = true;
@@ -152,7 +171,7 @@ public class LangChainService implements AIService {
                     // 🔥 在代码块内，输出纯代码内容（跳过语言标记）
                     if (inCodeBlock) {
                         // 跳过第一个 token 如果它是语言标记（java、python 等）
-                        if (codeBuffer.length() == 0 && token.trim().matches("(java|python|javascript|cpp|c|python3|js|ts)")) {
+                        if (codeBuffer.length() == 0 && CODE_LANG_TOKEN_PATTERN.matcher(token.trim()).matches()) {
                             return; // 跳过语言标记，不输出
                         }
 
@@ -477,8 +496,7 @@ public class LangChainService implements AIService {
     }
 
     private String extractFileNameFromCommand(String response) {
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("write_file\\s+\"([^\"]+)\"");
-        java.util.regex.Matcher matcher = pattern.matcher(response);
+        java.util.regex.Matcher matcher = WRITE_FILE_NAME_PATTERN.matcher(response);
         if (matcher.find()) {
             return matcher.group(1);
         }
@@ -488,9 +506,7 @@ public class LangChainService implements AIService {
     private String extractContentFromCommand(String response) {
         // 使用贪婪匹配，匹配到最后一个引号
         // 支持转义的引号 \"
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-            "write_file\\s+\"[^\"]+\"\\s+\"((?:[^\"\\\\]|\\\\.)*)\"");
-        java.util.regex.Matcher matcher = pattern.matcher(response);
+        java.util.regex.Matcher matcher = WRITE_FILE_CONTENT_PATTERN.matcher(response);
         if (matcher.find()) {
             String content = matcher.group(1);
             // 处理转义字符
@@ -503,8 +519,7 @@ public class LangChainService implements AIService {
     }
 
     private String extractFileName(String response) {
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("([\\w/]+\\.java)");
-        java.util.regex.Matcher matcher = pattern.matcher(response);
+        java.util.regex.Matcher matcher = JAVA_FILE_PATTERN.matcher(response);
         if (matcher.find()) {
             return matcher.group(1);
         }
@@ -517,18 +532,13 @@ public class LangChainService implements AIService {
      */
     private String extractFileNameFromText(String response) {
         // 优先匹配 "文件名：XXX" 或 "filename: XXX" 格式
-        java.util.regex.Pattern pattern1 = java.util.regex.Pattern.compile(
-            "(?:文件名|filename|file name)\\s*[:：]?\\s*([\\w/]+\\.\\w+)",
-            java.util.regex.Pattern.CASE_INSENSITIVE
-        );
-        java.util.regex.Matcher matcher1 = pattern1.matcher(response);
+        java.util.regex.Matcher matcher1 = FILE_NAME_KEYWORD_PATTERN.matcher(response);
         if (matcher1.find()) {
             return matcher1.group(1);
         }
 
         // 其次匹配任何文件名格式
-        java.util.regex.Pattern pattern2 = java.util.regex.Pattern.compile("([\\w/]+\\.(?:java|py|js|ts|cpp|c|h))");
-        java.util.regex.Matcher matcher2 = pattern2.matcher(response);
+        java.util.regex.Matcher matcher2 = ANY_CODE_FILE_PATTERN.matcher(response);
         if (matcher2.find()) {
             return matcher2.group(1);
         }
@@ -537,8 +547,7 @@ public class LangChainService implements AIService {
     }
 
     private String extractFileContent(String response) {
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("```(?:java)?\\s*\\n([\\s\\S]*?)\\n```");
-        java.util.regex.Matcher matcher = pattern.matcher(response);
+        java.util.regex.Matcher matcher = CODE_BLOCK_PATTERN.matcher(response);
         if (matcher.find()) {
             return matcher.group(1).trim();
         }
@@ -551,9 +560,7 @@ public class LangChainService implements AIService {
             return codeBlock;
         }
 
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-            "(?:public\\s+)?class\\s+\\w+\\s*\\{[\\s\\S]*?\\n\\}");
-        java.util.regex.Matcher matcher = pattern.matcher(response);
+        java.util.regex.Matcher matcher = CLASS_BODY_PATTERN.matcher(response);
         if (matcher.find()) {
             return matcher.group(0).trim();
         }
@@ -641,7 +648,7 @@ public class LangChainService implements AIService {
         }
 
         // 移除 write_file 命令及其后续内容
-        String result = text.replaceAll("\\s*write_file\\s+\"[^\"]+\"[\\s\\S]*", "");
+        String result = WRITE_FILE_CLEANUP_PATTERN.matcher(text).replaceFirst("");
 
         // 移除尾部的多余空白
         return result.trim();

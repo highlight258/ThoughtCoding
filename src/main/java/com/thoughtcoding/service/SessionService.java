@@ -123,15 +123,11 @@ public class SessionService {
                             return null;
                         }
 
-                        ChatMessage msg = new ChatMessage(role, content, sessionId);
-
-                        // 设置非 final 字段
+                        Object msgId = messageMap.get("id");
                         Object timestamp = messageMap.get("timestamp");
-                        if (timestamp != null) {
-                            msg.setTimestamp(timestamp.toString());
-                        }
-
-                        return msg;
+                        String id = msgId != null ? msgId.toString() : java.util.UUID.randomUUID().toString();
+                        String ts = timestamp != null ? timestamp.toString() : java.time.Instant.now().toString();
+                        return new ChatMessage(id, role, content, ts, sessionId);
                     })
                     .filter(Objects::nonNull) // 过滤掉 null
                     .collect(Collectors.toList());

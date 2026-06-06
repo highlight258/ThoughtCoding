@@ -1,8 +1,6 @@
 package com.thoughtcoding.mcp;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thoughtcoding.mcp.model.MCPTool;
-import com.thoughtcoding.model.ToolResult;
 import com.thoughtcoding.tools.BaseTool; // 使用你的 BaseTool 基类
 import com.thoughtcoding.tools.ToolRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -74,67 +72,16 @@ public class MCPService {
     }
 
     private List<BaseTool> convertToBaseTools(List<MCPTool> mcpTools, String serverName) {
+        MCPClient client = connectedServers.get(serverName);
+        if (client == null) {
+            log.warn("无法获取 MCP 客户端实例: {}", serverName);
+            return List.of();
+        }
         List<BaseTool> baseTools = new ArrayList<>();
         for (MCPTool mcpTool : mcpTools) {
-            BaseTool baseTool = new BaseTool(mcpTool.getName(), mcpTool.getDescription()) {
-                @Override
-                public ToolResult execute(String input) {
-                    try {
-                        // 🔥 修复：正确解析JSON参数
-                        Map<String, Object> parameters = parseInputToParameters(input);
-                        Object result = callTool(serverName, mcpTool.getName(), parameters);
-                        return success(result != null ? result.toString() : "执行成功");
-                    } catch (Exception e) {
-                        return error("工具执行失败: " + e.getMessage());
-                    }
-                }
-
-                @Override
-                public String getCategory() {
-                    return "MCP-" + serverName;
-                }
-
-                @Override
-                public boolean isEnabled() {
-                    return true;
-                }
-
-                // 🔥 关键修复：暴露inputSchema给系统提示词（重写BaseTool方法）
-                public Object getInputSchema() {
-                    return mcpTool.getInputSchema();
-                }
-            };
-            baseTools.add(baseTool);
+            baseTools.add(new MCPToolAdapter(mcpTool, client));
         }
         return baseTools;
-    }
-
-    /**
-     * 🔥 修复：优先解析JSON格式的参数
-     * 如果输入是JSON对象，直接解析为Map；否则作为单个参数
-     */
-    private Map<String, Object> parseInputToParameters(String input) {
-        Map<String, Object> parameters = new HashMap<>();
-
-        if (input == null || input.trim().isEmpty()) {
-            return parameters;
-        }
-
-        // 🔥 优先尝试解析JSON
-        if (input.trim().startsWith("{")) {
-            try {
-                ObjectMapper mapper = new ObjectMapper();
-                Map<String, Object> parsed = mapper.readValue(input, Map.class);
-                log.debug("✅ 成功解析JSON参数: {}", parsed);
-                return parsed;
-            } catch (Exception e) {
-                log.debug("⚠️ JSON解析失败，使用默认解析: {}", e.getMessage());
-            }
-        }
-
-        // 如果不是JSON或解析失败，将整个输入作为单个参数
-        parameters.put("input", input);
-        return parameters;
     }
 
     public Object callTool(String serverName, String toolName, Map<String, Object> arguments) {
@@ -153,14 +100,6 @@ public class MCPService {
 
 
 
-
-    private List<BaseTool> convertTools(List<MCPTool> mcpTools, MCPClient client) {
-        List<BaseTool> result = new ArrayList<>();
-        for (MCPTool mcpTool : mcpTools) {
-            result.add(new MCPToolAdapter(mcpTool, client));
-        }
-        return result;
-    }
 
     public void disconnectServer(String serverName) {
         MCPClient client = connectedServers.remove(serverName);

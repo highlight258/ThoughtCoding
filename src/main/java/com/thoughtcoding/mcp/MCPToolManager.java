@@ -148,7 +148,12 @@ public class MCPToolManager {
 
             if (config != null) {
                 String serverName = "predefined-" + trimmedName;
-                String command = config.get("command").get(0);
+                List<String> commandList = config.get("command");
+                if (commandList == null || commandList.isEmpty()) {
+                    log.warn("⚠️ 预定义工具 {} 的命令配置为空，跳过连接", trimmedName);
+                    continue;
+                }
+                String command = commandList.get(0);
                 List<String> args = config.get("args");
 
                 log.info("正在连接预定义工具: {} (命令: {}, 参数: {})", trimmedName, command, args);

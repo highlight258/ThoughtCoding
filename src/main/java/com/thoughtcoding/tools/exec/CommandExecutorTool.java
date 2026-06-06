@@ -95,27 +95,32 @@ public class CommandExecutorTool extends BaseTool {
             processBuilder.redirectErrorStream(true);
 
             Process process = processBuilder.start();
+            try {
+                // 读取输出
+                StringBuilder output = new StringBuilder();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        output.append(line).append("\n");
+                    }
+                }
 
-            // 读取输出
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
+                // 等待进程完成
+                int exitCode = process.waitFor();
+
+                String result = output.toString().trim();
+                if (exitCode != 0) {
+                    return error("Command failed with exit code " + exitCode + ":\n" + result,
+                            System.currentTimeMillis() - startTime);
+                }
+
+                return success(result.isEmpty() ? "Command executed successfully (no output)" : result,
+                        System.currentTimeMillis() - startTime);
+            } finally {
+                if (process.isAlive()) {
+                    process.destroy();
                 }
             }
-
-            // 等待进程完成
-            int exitCode = process.waitFor();
-
-            String result = output.toString().trim();
-            if (exitCode != 0) {
-                return error("Command failed with exit code " + exitCode + ":\n" + result,
-                        System.currentTimeMillis() - startTime);
-            }
-
-            return success(result.isEmpty() ? "Command executed successfully (no output)" : result,
-                    System.currentTimeMillis() - startTime);
 
         } catch (Exception e) {
             return error("Command execution failed: " + e.getMessage(), System.currentTimeMillis() - startTime);

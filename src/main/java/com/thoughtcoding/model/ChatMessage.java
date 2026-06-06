@@ -80,15 +80,12 @@ public class ChatMessage {
         return "system".equals(role);
     }
 
-    public void setRole() {
-        String role = "user";
-    }
-
-    public void setContent() {
-        String content = "";
-    }
-
-    public void setTimestamp(String s) {
-        String toString = Instant.now().toString();
+    /** 从已持久化的 session 恢复消息时使用，保留原始 ID 和时间戳 */
+    public ChatMessage(String id, String role, String content, String timestamp, String sessionId) {
+        this.id = id;
+        this.role = role;
+        this.content = content;
+        this.timestamp = timestamp;
+        this.sessionId = sessionId;
     }
 }

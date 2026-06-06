@@ -105,6 +105,6 @@ public class GrepSearchTool extends BaseTool {
 
     @Override
     public boolean isEnabled() {
-        return appConfig != null && appConfig.getTools().getCommandExec().isEnabled();
+        return appConfig != null && appConfig.getTools().getSearch().isEnabled();
     }
 }

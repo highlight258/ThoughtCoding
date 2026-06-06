@@ -7,6 +7,8 @@ import com.thoughtcoding.model.ToolResult;
 import com.thoughtcoding.service.PerformanceMonitor;
 import com.thoughtcoding.tools.BaseTool;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +32,8 @@ public class AgentLoop {
     private final String modelName;
     private final ToolExecutionConfirmation confirmation;  // 🔥 新增：交互式确认组件
     private final OptionManager optionManager;  // 🔥 新增：选项管理器
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     public AgentLoop(ThoughtCodingContext context, String sessionId, String modelName) {
         this.context = context;
@@ -134,7 +138,7 @@ public class AgentLoop {
     }
 
     // 用于缓存工具调用，等待 AI 响应完成后再执行
-    private ToolCall pendingToolCall = null;
+    private volatile ToolCall pendingToolCall = null;
 
     private void handleToolCall(ToolCall toolCall) {
         // 🔥 不再显示工具调用通知（已在流式输出中显示）
@@ -656,7 +660,7 @@ public class AgentLoop {
 
         try {
             // 使用 Jackson 将参数转换为 JSON
-            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(parameters);
+            return OBJECT_MAPPER.writeValueAsString(parameters);
         } catch (Exception e) {
             // 降级：简单的 JSON 拼接
             StringBuilder json = new StringBuilder("{");

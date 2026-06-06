@@ -22,6 +22,11 @@ public class MCPClient {
     private BufferedReader reader;
     private BufferedWriter writer;
     private final Map<String, MCPTool> availableTools = new ConcurrentHashMap<>();
+    // 串行化 JSON-RPC I/O，防止并发调用时 writer 交叉写入导致协议流损坏
+    private final Object ioLock = new Object();
+
+    private Thread errorMonitorThread;
+
     private boolean initialized = false;
     private final String serverName;
 
@@ -114,12 +119,13 @@ public class MCPClient {
                     // 不再输出 MCP 服务器的标准错误流信息
                 }
             } catch (Exception e) {
-                // 正常结束
+                log.debug("MCP 错误流监控线程正常退出: {}", serverName);
             }
         });
         errorThread.setDaemon(true);
         errorThread.setName("MCP-Error-" + serverName);
         errorThread.start();
+        this.errorMonitorThread = errorThread;
     }
 
     private void startOutputMonitoring() {
@@ -183,9 +189,16 @@ public class MCPClient {
         sendRequest(request);
 
         MCPResponse response = readResponse(3000);
-        if (response != null && response.getResult() != null) {
+        if (response != null && response.getResult() instanceof Map) {
+            @SuppressWarnings("unchecked")
             Map<String, Object> result = (Map<String, Object>) response.getResult();
-            List<Map<String, Object>> toolsList = (List<Map<String, Object>>) result.get("tools");
+            Object toolsObj = result.get("tools");
+            List<Map<String, Object>> toolsList;
+            if (toolsObj instanceof List) {
+                toolsList = (List<Map<String, Object>>) toolsObj;
+            } else {
+                toolsList = new ArrayList<>();
+            }
 
             if (toolsList != null) {
                 for (Map<String, Object> toolData : toolsList) {
@@ -206,21 +219,24 @@ public class MCPClient {
             throw new IllegalStateException("MCP客户端未初始化");
         }
 
-        MCPRequest request = new MCPRequest(
-                "tools/call",
-                Map.of("name", toolName, "arguments", arguments)
-        );
+        synchronized (ioLock) {
+            MCPRequest request = new MCPRequest(
+                    "tools/call",
+                    Map.of("name", toolName, "arguments", arguments)
+            );
 
-        sendRequest(request);
-        MCPResponse response = readResponse(30000);
+            sendRequest(request);
+            MCPResponse response = readResponse(30000);
 
-        if (response != null) {
-            if (response.getError() != null) {
-                throw new IOException("工具调用失败: " + response.getError().getMessage());
-            }
-            if (response.getResult() != null) {
-                Map<String, Object> result = (Map<String, Object>) response.getResult();
-                return result.get("content");
+            if (response != null) {
+                if (response.getError() != null) {
+                    throw new IOException("工具调用失败: " + response.getError().getMessage());
+                }
+                if (response.getResult() instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> result = (Map<String, Object>) response.getResult();
+                    return result.get("content");
+                }
             }
         }
 
@@ -300,7 +316,7 @@ public class MCPClient {
                 }
             }
         } catch (Exception e) {
-            // 忽略
+            log.debug("MCP 超时后最终读取失败（可忽略）: {}", e.getMessage());
         }
 
         throw new IOException("读取响应超时 (等待了 " + totalTime + "ms)");
@@ -315,6 +331,11 @@ public class MCPClient {
             }
             if (reader != null) {
                 reader.close();
+            }
+            // 中断并清理错误监控线程
+            if (errorMonitorThread != null && errorMonitorThread.isAlive()) {
+                errorMonitorThread.interrupt();
+                errorMonitorThread = null;
             }
             if (process != null) {
                 process.destroy();
