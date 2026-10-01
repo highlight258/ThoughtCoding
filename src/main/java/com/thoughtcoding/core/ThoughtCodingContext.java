@@ -3,8 +3,15 @@ package com.thoughtcoding.core;
 import com.thoughtcoding.config.AppConfig;
 import com.thoughtcoding.config.ConfigManager;
 import com.thoughtcoding.config.MCPConfig;
+import com.thoughtcoding.mcp.MCPHealthCheckScheduler;
 import com.thoughtcoding.mcp.MCPService;
+import com.thoughtcoding.mcp.MCPToolAdapter;
 import com.thoughtcoding.mcp.MCPToolManager;
+import com.thoughtcoding.rag.CodeChunker;
+import com.thoughtcoding.rag.CodebaseIndexer;
+import com.thoughtcoding.rag.CodebaseSearchTool;
+import com.thoughtcoding.rag.TfidfVectorizer;
+import com.thoughtcoding.rag.VectorStore;
 import com.thoughtcoding.service.AIService;
 import com.thoughtcoding.service.ContextManager;
 import com.thoughtcoding.service.LangChainService;
@@ -47,6 +54,12 @@ public class ThoughtCodingContext {
     // 🔥 新增上下文管理器
     private final ContextManager contextManager;
 
+    // 🔥 新增 RAG 代码库索引
+    private final CodebaseIndexer codebaseIndexer;
+
+    // 🔥 新增 MCP 健康检查调度器
+    private MCPHealthCheckScheduler mcpHealthCheckScheduler;
+
     private ThoughtCodingContext(Builder builder) {
         this.appConfig = builder.appConfig;
         this.mcpConfig = builder.mcpConfig;
@@ -58,6 +71,7 @@ public class ThoughtCodingContext {
         this.mcpService = builder.mcpService;
         this.mcpToolManager = builder.mcpToolManager;
         this.contextManager = builder.contextManager;
+        this.codebaseIndexer = builder.codebaseIndexer;
     }
 
     public static ThoughtCodingContext initialize() {
@@ -104,11 +118,29 @@ public class ThoughtCodingContext {
         SessionService sessionService = new SessionService();
         PerformanceMonitor performanceMonitor = new PerformanceMonitor();
 
+        // 🔥 RAG 代码库索引初始化
+        CodeChunker chunker = new CodeChunker();
+        TfidfVectorizer vectorizer = new TfidfVectorizer();
+        VectorStore vectorStore = new VectorStore();
+        CodebaseIndexer codebaseIndexer = new CodebaseIndexer(chunker, vectorizer, vectorStore);
+
+        // 注册代码库搜索工具
+        String projectRoot = System.getProperty("user.dir");
+        CodebaseSearchTool searchTool = new CodebaseSearchTool(appConfig, vectorStore, vectorizer, codebaseIndexer);
+        toolRegistry.register(searchTool);
+
+        // 异步构建/更新索引，不阻塞启动
+        if (vectorStore.indexExists()) {
+            codebaseIndexer.asyncIncrementalUpdate(projectRoot);
+        } else {
+            codebaseIndexer.asyncBuildIndex(projectRoot);
+        }
+
         // UI层初始化
         ThoughtCodingUI ui = new ThoughtCodingUI();
 
         // 构建上下文（核心层初始化）
-        return new Builder()
+        ThoughtCodingContext ctx = new Builder()
                 .appConfig(appConfig)
                 .mcpConfig(mcpConfig)
                 .aiService(aiService)
@@ -119,7 +151,23 @@ public class ThoughtCodingContext {
                 .mcpService(mcpService)
                 .mcpToolManager(mcpToolManager)
                 .contextManager(contextManager)  // 🔥 添加 contextManager
+                .codebaseIndexer(codebaseIndexer)  // 🔥 添加 RAG 索引器
                 .build();
+
+        // 🔥 启动 MCP 健康检查调度器
+        if (mcpConfig != null && mcpConfig.isEnabled()) {
+            MCPHealthCheckScheduler scheduler = new MCPHealthCheckScheduler(mcpService, toolRegistry);
+            scheduler.start();
+            ctx.mcpHealthCheckScheduler = scheduler;
+
+            // 注册 JVM 关闭钩子：确保退出时清理 MCP 子进程，防止僵尸进程
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                scheduler.stop();
+                mcpService.shutdown();
+            }, "MCP-ShutdownHook"));
+        }
+
+        return ctx;
     }
 
     /**
@@ -255,6 +303,9 @@ public class ThoughtCodingContext {
      * 🔥 关闭 MCP 服务
      */
     public void shutdownMCP() {
+        if (mcpHealthCheckScheduler != null) {
+            mcpHealthCheckScheduler.stop();
+        }
         if (mcpService != null) {
             mcpService.shutdown();
         }
@@ -273,6 +324,7 @@ public class ThoughtCodingContext {
 
     // 🔥 新增 contextManager Getter
     public ContextManager getContextManager() { return contextManager; }
+    public CodebaseIndexer getCodebaseIndexer() { return codebaseIndexer; }
     public ThoughtCodingUI getUi() { return ui; }
     public PerformanceMonitor getPerformanceMonitor() { return performanceMonitor; }
 
@@ -300,6 +352,9 @@ public class ThoughtCodingContext {
         private MCPToolManager mcpToolManager;
         // 🔥 新增上下文管理器字段
         private ContextManager contextManager;
+
+        // 🔥 新增 RAG 索引器字段
+        private CodebaseIndexer codebaseIndexer;
 
         public Builder appConfig(AppConfig appConfig) {
             this.appConfig = appConfig;
@@ -350,6 +405,12 @@ public class ThoughtCodingContext {
         // 🔥 新增 contextManager Builder 方法
         public Builder contextManager(ContextManager contextManager) {
             this.contextManager = contextManager;
+            return this;
+        }
+
+        // 🔥 新增 codebaseIndexer Builder 方法
+        public Builder codebaseIndexer(CodebaseIndexer codebaseIndexer) {
+            this.codebaseIndexer = codebaseIndexer;
             return this;
         }
 

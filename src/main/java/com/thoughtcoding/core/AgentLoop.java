@@ -5,6 +5,7 @@ import com.thoughtcoding.model.ToolCall;
 import com.thoughtcoding.model.ToolExecution;
 import com.thoughtcoding.model.ToolResult;
 import com.thoughtcoding.service.PerformanceMonitor;
+import com.thoughtcoding.service.ToolResultSummarizer;
 import com.thoughtcoding.tools.BaseTool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,6 +35,7 @@ public class AgentLoop {
     private final OptionManager optionManager;  // 🔥 新增：选项管理器
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final int MAX_REACT_ITERATIONS = 10;
 
     public AgentLoop(ThoughtCodingContext context, String sessionId, String modelName) {
         this.context = context;
@@ -62,29 +64,42 @@ public class AgentLoop {
     }
 
     public void processInput(String input) {
-        // 开始性能监控
         PerformanceMonitor monitor = context.getPerformanceMonitor();
         monitor.start();
 
         try {
-            // 🔥 检查是否是选项输入（用户输入 1/2/3/4 选择）
             if (optionManager.isOptionInput(input)) {
                 handleOptionSelection(input);
                 return;
             }
 
-            // 重置待处理的工具调用
-            pendingToolCall = null;
-
-            // 添加用户消息到历史
+            // 添加用户消息到历史（只加一次，不在循环内重复添加）
             ChatMessage userMessage = new ChatMessage("user", input);
             history.add(userMessage);
 
-            // 流式处理AI响应
-            context.getAiService().streamingChat(input, history, modelName);
+            // ReAct 循环：Reason → Act → Observe → Reason → ...
+            int iteration = 0;
+            while (iteration < MAX_REACT_ITERATIONS) {
+                iteration++;
 
-            // 🔥 AI 响应完成后，执行待处理的工具调用
-            executePendingToolCall();
+                // 重置待处理的工具调用
+                pendingToolCall = null;
+
+                // 首轮传用户原始输入，后续轮传空字符串（AI 从 history 中读取上下文）
+                String promptForThisRound = (iteration == 1) ? input : "";
+                context.getAiService().streamingChat(promptForThisRound, history, modelName);
+
+                // AI 没有请求工具调用 → 推理完成，退出循环
+                if (pendingToolCall == null) {
+                    break;
+                }
+
+                // 执行工具调用，结果会写入 history
+                boolean toolExecuted = executeReActToolCall();
+                if (!toolExecuted) {
+                    break;
+                }
+            }
 
             // 保存会话
             context.getSessionService().saveSession(sessionId, history);
@@ -92,7 +107,6 @@ public class AgentLoop {
         } catch (Exception e) {
             context.getUi().displayError("Error processing input: " + e.getMessage());
         } finally {
-            // 结束性能监控
             monitor.stop();
         }
     }
@@ -146,6 +160,27 @@ public class AgentLoop {
 
         // 🔥 缓存工具调用，不立即执行（等待 AI 流式输出完成）
         this.pendingToolCall = toolCall;
+    }
+
+    /**
+     * ReAct 循环中的工具执行：简化确认 + 执行 + 写入 history。
+     * @return true 表示工具执行成功且结果已写入 history，可继续循环
+     */
+    private boolean executeReActToolCall() {
+        if (pendingToolCall == null) {
+            return false;
+        }
+
+        try {
+            // 流式输出中已显示工具调用详情，这里只需简单确认
+            boolean confirmed = confirmation.askSimpleConfirmation();
+            if (!confirmed) {
+                return false;
+            }
+            return executeToolCall(pendingToolCall);
+        } finally {
+            pendingToolCall = null;
+        }
     }
 
     /**
@@ -576,8 +611,6 @@ public class AgentLoop {
             // 🔥 显示执行结果
             if (result.isSuccess()) {
                 context.getUi().displaySuccess("✅ 完成");
-
-                // 🔥 显示工具输出内容（如果有）
                 String output = result.getOutput();
                 if (output != null && !output.trim().isEmpty()) {
                     // 使用分行显示，确保输出清晰
@@ -588,8 +621,7 @@ public class AgentLoop {
                     context.getUi().getTerminal().writer().flush();
                 }
 
-                // 🔥 关键修复：将工具执行结果添加到历史记录中
-                // 这样 AI 在下一轮对话中就能看到工具的执行结果
+                // 将工具执行结果添加到历史记录中，AI 在下一轮可看到结果
                 ChatMessage toolResultMessage = new ChatMessage("system",
                     formatToolResultForHistory(toolCall, result));
                 history.add(toolResultMessage);
@@ -642,7 +674,7 @@ public class AgentLoop {
         String output = result.getOutput();
         if (output != null && !output.trim().isEmpty()) {
             formatted.append("Result:\n");
-            formatted.append(output);
+            formatted.append(ToolResultSummarizer.summarize(output));
         } else {
             formatted.append("Operation completed successfully.");
         }

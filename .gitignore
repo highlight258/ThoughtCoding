@@ -20,3 +20,9 @@ sessions/
 
 # 本地配置（不提交）
 config.yaml
+# 个人学习笔记（不提交）
+ClawCode面试准备.md
+RAG测试方法与量化结果.md
+input-to-output-sequence.md
+从0深入理解ThoughtCoding-学习计划.md
+模拟面试对话.md

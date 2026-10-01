@@ -30,6 +30,10 @@ public class MCPClient {
     private boolean initialized = false;
     private final String serverName;
 
+    // 存储用于重连的配置
+    private String command;
+    private List<String> args;
+
     public MCPClient(String serverName) {
         this.serverName = serverName;
     }
@@ -87,6 +91,9 @@ public class MCPClient {
             if (initializeProtocol()) {
                 listTools();
                 initialized = true;
+                // 存储配置用于后续重连
+                this.command = fullCommand;
+                this.args = args != null ? new ArrayList<>(args) : new ArrayList<>();
                 log.debug("✅ MCP客户端初始化成功: {} ({} 个工具)", serverName, availableTools.size());
                 return true;
             } else {
@@ -320,6 +327,36 @@ public class MCPClient {
         }
 
         throw new IOException("读取响应超时 (等待了 " + totalTime + "ms)");
+    }
+
+    /**
+     * 发送 JSON-RPC ping 进行健康检查
+     * @param timeoutMs 超时时间（毫秒）
+     * @return true 表示服务端正常响应
+     */
+    public boolean ping(int timeoutMs) {
+        if (!isConnected()) {
+            return false;
+        }
+        synchronized (ioLock) {
+            try {
+                MCPRequest req = new MCPRequest("ping", null);
+                sendRequest(req);
+                MCPResponse resp = readResponse(timeoutMs);
+                return resp != null && resp.getError() == null;
+            } catch (Exception e) {
+                log.debug("Ping 失败: {}", serverName, e.getMessage());
+                return false;
+            }
+        }
+    }
+
+    public String getCommand() {
+        return command;
+    }
+
+    public List<String> getArgs() {
+        return args != null ? new ArrayList<>(args) : new ArrayList<>();
     }
 
     public void disconnect() {

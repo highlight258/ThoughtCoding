@@ -1,9 +1,8 @@
 package com.thoughtcoding.mcp;
 
 import com.thoughtcoding.mcp.model.MCPTool;
-import com.thoughtcoding.tools.BaseTool; // 使用你的 BaseTool 基类
+import com.thoughtcoding.tools.BaseTool;
 import com.thoughtcoding.tools.ToolRegistry;
-import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,52 +10,58 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * MCP服务，管理与多个MCP服务器的连接和工具调用
+ * MCP服务，管理与多个MCP服务器的连接和工具调用。
+ * 支持健康检查、指数退避重连和重连后 ToolRegistry 同步。
  */
 public class MCPService {
     private static final Logger log = LoggerFactory.getLogger(MCPService.class);
     private final Map<String, MCPClient> connectedServers = new ConcurrentHashMap<>();
-    private final Map<String, BaseTool> mcpTools = new ConcurrentHashMap<>(); // 改为 BaseTool
+    private final Map<String, BaseTool> mcpTools = new ConcurrentHashMap<>();
     private final ToolRegistry toolRegistry;
+
+    // 工具名 → 服务端名映射（用于正确清理和查找）
+    private final Map<String, String> toolToServer = new ConcurrentHashMap<>();
+
+    // 服务端连接配置存储（用于重连时重建连接）
+    private final Map<String, ServerConnectionState> serverConfigs = new ConcurrentHashMap<>();
 
     public MCPService(ToolRegistry toolRegistry) {
         this.toolRegistry = toolRegistry;
     }
-    // 添加 clients 映射
-    private final Map<String, MCPClient> clients = new ConcurrentHashMap<>();
 
-
-    // 🔥 新增3参数方法
     public List<BaseTool> connectToServer(String serverName, String command, List<String> args) {
         try {
             log.debug("启动MCP服务器: {} - {}", serverName, command);
             log.debug("参数: {}", args);
 
             // 清理旧连接
-            if (clients.containsKey(serverName)) {
-                MCPClient existingClient = clients.get(serverName);
+            if (connectedServers.containsKey(serverName)) {
+                MCPClient existingClient = connectedServers.get(serverName);
                 if (existingClient != null && existingClient.isConnected()) {
                     existingClient.disconnect();
                 }
-                clients.remove(serverName);
-                connectedServers.remove(serverName); // 🔥 同时清理 connectedServers
+                // 清理旧工具映射
+                cleanupServerTools(serverName);
+                connectedServers.remove(serverName);
             }
 
             MCPClient client = new MCPClient(serverName);
             boolean connected = client.connect(command, args);
 
             if (connected) {
-                // 🔥 保存到两个映射中
-                clients.put(serverName, client);
                 connectedServers.put(serverName, client);
+
+                // 存储连接配置用于后续重连
+                serverConfigs.put(serverName, new ServerConnectionState(serverName, command, args));
 
                 List<MCPTool> mcpToolList = client.getAvailableTools();
                 List<BaseTool> baseTools = convertToBaseTools(mcpToolList, serverName);
 
-                // 🔥 保存工具到 mcpTools 映射
+                // 保存工具到 mcpTools 映射，同时记录工具→服务端关系
                 for (int i = 0; i < mcpToolList.size(); i++) {
-                    String toolKey = mcpToolList.get(i).getName(); // 使用工具名称作为key
+                    String toolKey = mcpToolList.get(i).getName();
                     mcpTools.put(toolKey, baseTools.get(i));
+                    toolToServer.put(toolKey, serverName);
                 }
 
                 log.debug("✅ 成功连接MCP服务器: {} ({} 个工具)", serverName, baseTools.size());
@@ -86,7 +91,7 @@ public class MCPService {
 
     public Object callTool(String serverName, String toolName, Map<String, Object> arguments) {
         try {
-            MCPClient client = clients.get(serverName);
+            MCPClient client = connectedServers.get(serverName);
             if (client == null) {
                 throw new IllegalStateException("MCP服务器未连接: " + serverName);
             }
@@ -97,26 +102,36 @@ public class MCPService {
         }
     }
 
-
-
-
-
     public void disconnectServer(String serverName) {
         MCPClient client = connectedServers.remove(serverName);
         if (client != null) {
-            // 移除相关工具
-            mcpTools.entrySet().removeIf(entry -> {
-                boolean shouldRemove = entry.getKey().startsWith("mcp:" + serverName + "/");
-                if (shouldRemove) {
-                    // 根据你的 ToolRegistry 实现，可能需要不同的取消注册方法
-                    // 如果没有 unregister 方法，可能需要其他方式处理
-                    log.debug("移除MCP工具: {}", entry.getKey());
-                }
-                return shouldRemove;
-            });
+            // 清理 mcpTools 和 toolToServer 中的相关工具条目
+            cleanupServerTools(serverName);
+
+            // 清理服务端配置
+            serverConfigs.remove(serverName);
 
             client.disconnect();
             log.debug("已断开MCP服务器: {}", serverName);
+        }
+    }
+
+    /**
+     * 清理指定服务端在 mcpTools 和 toolToServer 中的所有工具
+     */
+    private void cleanupServerTools(String serverName) {
+        Iterator<Map.Entry<String, String>> iter = toolToServer.entrySet().iterator();
+        while (iter.hasNext()) {
+            Map.Entry<String, String> entry = iter.next();
+            if (serverName.equals(entry.getValue())) {
+                String toolName = entry.getKey();
+                mcpTools.remove(toolName);
+                // 也从 ToolRegistry 中移除
+                if (toolRegistry != null) {
+                    toolRegistry.unregister(toolName);
+                }
+                iter.remove();
+            }
         }
     }
 
@@ -126,11 +141,14 @@ public class MCPService {
 
     public List<BaseTool> getServerTools(String serverName) {
         List<BaseTool> tools = new ArrayList<>();
-        mcpTools.forEach((name, tool) -> {
-            if (name.startsWith("mcp:" + serverName + "/")) {
-                tools.add(tool);
+        for (Map.Entry<String, String> entry : toolToServer.entrySet()) {
+            if (serverName.equals(entry.getValue())) {
+                BaseTool tool = mcpTools.get(entry.getKey());
+                if (tool != null) {
+                    tools.add(tool);
+                }
             }
-        });
+        }
         return tools;
     }
 
@@ -140,6 +158,77 @@ public class MCPService {
 
     public List<String> getAvailableToolNames() {
         return new ArrayList<>(mcpTools.keySet());
+    }
+
+    // ────────── 重连 API ──────────
+
+    /**
+     * 获取指定服务端的连接配置（用于重连）
+     */
+    public ServerConnectionState getServerConfig(String serverName) {
+        return serverConfigs.get(serverName);
+    }
+
+    /**
+     * 获取存储的命令
+     */
+    public String getStoredCommand(String serverName) {
+        ServerConnectionState config = serverConfigs.get(serverName);
+        return config != null ? config.getCommand() : null;
+    }
+
+    /**
+     * 获取存储的参数
+     */
+    public List<String> getStoredArgs(String serverName) {
+        ServerConnectionState config = serverConfigs.get(serverName);
+        return config != null ? config.getArgs() : new ArrayList<>();
+    }
+
+    /**
+     * 获取客户端引用（用于健康检查）
+     */
+    public MCPClient getClient(String serverName) {
+        return connectedServers.get(serverName);
+    }
+
+    /**
+     * 获取所有客户端快照（用于健康检查遍历）
+     */
+    public Collection<MCPClient> getAllClients() {
+        return new ArrayList<>(connectedServers.values());
+    }
+
+    /**
+     * 重连成功后注册新的客户端和工具适配器。
+     * 先清理旧条目，再注册新的。
+     */
+    public void registerReconnectedServer(
+            String serverName,
+            MCPClient newClient,
+            List<MCPToolAdapter> newAdapters) {
+
+        // 清理旧的工具映射
+        cleanupServerTools(serverName);
+
+        // 注册新客户端
+        connectedServers.put(serverName, newClient);
+
+        // 注册新工具
+        for (MCPToolAdapter adapter : newAdapters) {
+            mcpTools.put(adapter.getName(), adapter);
+            toolToServer.put(adapter.getName(), serverName);
+        }
+
+        log.info("重连后注册完成: {} ({} 个工具)", serverName, newAdapters.size());
+    }
+
+    /**
+     * 检查指定服务端是否健康
+     */
+    public boolean isServerHealthy(String serverName) {
+        MCPClient client = connectedServers.get(serverName);
+        return client != null && client.isConnected();
     }
 
     public void shutdown() {

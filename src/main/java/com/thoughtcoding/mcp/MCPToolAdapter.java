@@ -16,7 +16,7 @@ public class MCPToolAdapter extends BaseTool {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(MCPToolAdapter.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private final MCPTool mcpTool;
-    private final MCPClient mcpClient;
+    private volatile MCPClient mcpClient;
 
     // 构造函数
     public MCPToolAdapter(MCPTool mcpTool, MCPClient mcpClient) {
@@ -104,5 +104,12 @@ public class MCPToolAdapter extends BaseTool {
      */
     public MCPClient getMCPClient() {
         return mcpClient;
+    }
+
+    /**
+     * 更新 MCP 客户端引用（重连后调用，同步适配器指向新连接）
+     */
+    public void updateMCPClient(MCPClient newClient) {
+        this.mcpClient = newClient;
     }
 }

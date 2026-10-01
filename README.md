@@ -18,6 +18,7 @@
 - **工具扩展** - 通过 MCP 支持文件管理、数据库操作、搜索、GitHub 等 50+ 种工具
 - **动态工具发现** - 自动发现和注册 MCP 服务器的可用工具
 - **即插即用** - 无需重启即可动态连接新的 MCP 服务器
+- **健康检查与自动重连** - 30s 周期 MCP 连接健康检查，指数退避自动重连，保活机制
 - **预定义工具** - 内置常用 MCP 工具快捷方式，一键连接
 - **配置管理** - 灵活的 YAML 配置文件系统，支持 MCP 服务器动态配置
 - **类型安全** - 完整的 Java 类型定义和封装
@@ -71,6 +72,8 @@ ThoughtCoding/
 │   │   ├── MCPClient.java               # MCP 客户端
 │   │   ├── MCPToolAdapter.java          # MCP 工具适配器
 │   │   ├── MCPToolManager.java          # MCP 工具管理器
+│   │   ├── MCPHealthCheckScheduler.java # 健康检查调度器（30s周期+指数退避重连）
+│   │   ├── ServerConnectionState.java   # 服务端连接状态（退避追踪）
 │   │   └── 📁 model/                    # MCP 协议数据模型
 │   │       ├── MCPRequest.java          # MCP 请求
 │   │       ├── MCPResponse.java         # MCP 响应
@@ -711,6 +714,7 @@ SessionData session = new SessionData("session-id", "标题", "model");
 - ✅ **多服务器支持** - 可同时连接多个 MCP 服务器
 - ✅ **预定义工具** - 内置常用 MCP 工具快捷方式，支持 `/mcp tools` 一键连接
 - ✅ **动态连接** - 运行时按需连接/断开 MCP 服务器，无需重启
+- ✅ **健康检查与自动重连** - 30s 周期 ping 检测，指数退避自动重连（1s→2s→4s→...→60s），重连后自动同步 ToolRegistry 适配器引用
 - ✅ **协议兼容** - 支持标准 MCP 协议规范（JSON-RPC over stdio）
 - ✅ **工具适配** - 自动将 MCP 工具适配为统一的 BaseTool 接口
 - ✅ **自动发现** - 启动时自动发现并注册已配置的 MCP 工具

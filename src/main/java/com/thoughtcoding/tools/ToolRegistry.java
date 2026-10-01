@@ -56,6 +56,13 @@ public class ToolRegistry implements ToolProvider {
         return tools.get(toolName);
     }
 
+    /**
+     * 从注册表中移除工具（用于 MCP 重连时替换旧适配器）
+     */
+    public void unregister(String toolName) {
+        tools.remove(toolName);
+    }
+
     @Override
     public boolean isToolAvailable(String toolName) {
         return tools.containsKey(toolName) && isToolEnabled(toolName);
