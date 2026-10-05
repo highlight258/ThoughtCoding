@@ -37,6 +37,13 @@ public class AgentLoop {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final int MAX_REACT_ITERATIONS = 10;
 
+    // 🔥 完成操作类断言关键词（用于对账检测疑似幻觉）
+    private static final List<String> COMPLETION_CLAIMS = List.of(
+        "已创建", "创建完成", "创建成功", "已生成", "生成成功", "已写入", "写入成功",
+        "已保存", "保存成功", "已删除", "删除成功", "已修改", "修改成功", "已执行",
+        "created", "successfully", "wrote", "completed"
+    );
+
     public AgentLoop(ThoughtCodingContext context, String sessionId, String modelName) {
         this.context = context;
         this.sessionId = sessionId;
@@ -79,6 +86,7 @@ public class AgentLoop {
 
             // ReAct 循环：Reason → Act → Observe → Reason → ...
             int iteration = 0;
+            boolean toolExecutedThisTurn = false;
             while (iteration < MAX_REACT_ITERATIONS) {
                 iteration++;
 
@@ -96,9 +104,16 @@ public class AgentLoop {
 
                 // 执行工具调用，结果会写入 history
                 boolean toolExecuted = executeReActToolCall();
-                if (!toolExecuted) {
+                if (toolExecuted) {
+                    toolExecutedThisTurn = true;
+                } else {
                     break;
                 }
+            }
+
+            // 🔥 对账机制：AI 声称完成操作但本轮未执行任何工具 → 疑似幻觉
+            if (!toolExecutedThisTurn) {
+                detectAndFlagPossibleHallucination();
             }
 
             // 保存会话
@@ -181,6 +196,46 @@ public class AgentLoop {
         } finally {
             pendingToolCall = null;
         }
+    }
+
+    /**
+     * 🔥 对账机制：AI 声称完成操作但本轮未执行任何工具时，提示疑似幻觉。
+     * 解决「正则漏检 → 静默失败」问题，把漏检从不可见变为可发现、可纠正。
+     *
+     * 启发式，存在误报可能（如 AI 引用上一轮已完成的动作），故只做软提醒，不阻断流程。
+     */
+    private void detectAndFlagPossibleHallucination() {
+        ChatMessage lastAssistant = null;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            ChatMessage msg = history.get(i);
+            if (msg.isAssistantMessage()) {
+                lastAssistant = msg;
+                break;
+            }
+        }
+        if (lastAssistant == null || !containsCompletionClaim(lastAssistant.getContent())) {
+            return;
+        }
+
+        context.getUi().displayWarning("⚠️ 检测到 AI 声称已完成操作，但本轮未执行任何工具，可能为幻觉，请核对结果");
+
+        ChatMessage flag = new ChatMessage("system",
+            "[系统提示] 上一条 AI 回复声称完成了操作，但实际未触发任何工具调用，该回复可能是幻觉。请向用户如实说明并重新执行操作。");
+        history.add(flag);
+    }
+
+    /** 判断文本是否包含「完成操作」类断言 */
+    private boolean containsCompletionClaim(String content) {
+        if (content == null || content.isEmpty()) {
+            return false;
+        }
+        String lower = content.toLowerCase();
+        for (String claim : COMPLETION_CLAIMS) {
+            if (lower.contains(claim)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
