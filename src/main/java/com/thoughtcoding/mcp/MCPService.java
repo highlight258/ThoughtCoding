@@ -22,8 +22,8 @@ public class MCPService {
     // 工具名 → 服务端名映射（用于正确清理和查找）
     private final Map<String, String> toolToServer = new ConcurrentHashMap<>();
 
-    // 服务端连接配置存储（用于重连时重建连接）
-    private final Map<String, ServerConnectionState> serverConfigs = new ConcurrentHashMap<>();
+    // 健康检查调度器（由 ThoughtCodingContext 注入；连接/断开时通知）
+    private volatile MCPHealthCheckScheduler scheduler;
 
     public MCPService(ToolRegistry toolRegistry) {
         this.toolRegistry = toolRegistry;
@@ -51,8 +51,10 @@ public class MCPService {
             if (connected) {
                 connectedServers.put(serverName, client);
 
-                // 存储连接配置用于后续重连
-                serverConfigs.put(serverName, new ServerConnectionState(serverName, command, args));
+                // 通知调度器：连接成功，重置为 HEALTHY 态
+                if (scheduler != null) {
+                    scheduler.onServerConnected(serverName, command, args);
+                }
 
                 List<MCPTool> mcpToolList = client.getAvailableTools();
                 List<BaseTool> baseTools = convertToBaseTools(mcpToolList, serverName);
@@ -103,16 +105,21 @@ public class MCPService {
     }
 
     public void disconnectServer(String serverName) {
+        closeConnectionForReconnect(serverName);
+        if (scheduler != null) {
+            scheduler.onServerDisconnected(serverName);
+        }
+        log.debug("已断开MCP服务器: {}", serverName);
+    }
+
+    /**
+     * 仅供调度器重连时使用：关闭旧连接并清理工具，但不通知调度器（避免重连任务自取消）。
+     */
+    public void closeConnectionForReconnect(String serverName) {
         MCPClient client = connectedServers.remove(serverName);
         if (client != null) {
-            // 清理 mcpTools 和 toolToServer 中的相关工具条目
             cleanupServerTools(serverName);
-
-            // 清理服务端配置
-            serverConfigs.remove(serverName);
-
             client.disconnect();
-            log.debug("已断开MCP服务器: {}", serverName);
         }
     }
 
@@ -163,29 +170,6 @@ public class MCPService {
     // ────────── 重连 API ──────────
 
     /**
-     * 获取指定服务端的连接配置（用于重连）
-     */
-    public ServerConnectionState getServerConfig(String serverName) {
-        return serverConfigs.get(serverName);
-    }
-
-    /**
-     * 获取存储的命令
-     */
-    public String getStoredCommand(String serverName) {
-        ServerConnectionState config = serverConfigs.get(serverName);
-        return config != null ? config.getCommand() : null;
-    }
-
-    /**
-     * 获取存储的参数
-     */
-    public List<String> getStoredArgs(String serverName) {
-        ServerConnectionState config = serverConfigs.get(serverName);
-        return config != null ? config.getArgs() : new ArrayList<>();
-    }
-
-    /**
      * 获取客户端引用（用于健康检查）
      */
     public MCPClient getClient(String serverName) {
@@ -214,13 +198,23 @@ public class MCPService {
         // 注册新客户端
         connectedServers.put(serverName, newClient);
 
-        // 注册新工具
+        // 注册新工具（收拢到 MCPService，同步 ToolRegistry）
         for (MCPToolAdapter adapter : newAdapters) {
             mcpTools.put(adapter.getName(), adapter);
             toolToServer.put(adapter.getName(), serverName);
+            if (toolRegistry != null) {
+                toolRegistry.register(adapter);
+            }
         }
 
         log.info("重连后注册完成: {} ({} 个工具)", serverName, newAdapters.size());
+    }
+
+    /**
+     * 注入健康检查调度器（构造后调用，避免构造期循环依赖）。
+     */
+    public void setHealthCheckScheduler(MCPHealthCheckScheduler scheduler) {
+        this.scheduler = scheduler;
     }
 
     /**

@@ -90,6 +90,14 @@ public class ThoughtCodingContext {
         MCPService mcpService = new MCPService(toolRegistry);
         MCPToolManager mcpToolManager = new MCPToolManager(mcpService, mcpConfig);
 
+        // 🔥 提前创建 MCP 健康检查调度器并注入 MCPService，
+        //    使初始化连接（initializeMCPTools）时能通过 onServerConnected 建立状态
+        MCPHealthCheckScheduler scheduler = null;
+        if (mcpConfig != null && mcpConfig.isEnabled()) {
+            scheduler = new MCPHealthCheckScheduler(mcpService);
+            mcpService.setHealthCheckScheduler(scheduler);
+        }
+
         // 注册内置工具 - 传递整个 AppConfig 对象
         if (appConfig.getTools().getFileManager().isEnabled()) {
             toolRegistry.register(new FileManagerTool(appConfig));
@@ -155,14 +163,14 @@ public class ThoughtCodingContext {
                 .build();
 
         // 🔥 启动 MCP 健康检查调度器
-        if (mcpConfig != null && mcpConfig.isEnabled()) {
-            MCPHealthCheckScheduler scheduler = new MCPHealthCheckScheduler(mcpService, toolRegistry);
+        if (scheduler != null) {
             scheduler.start();
             ctx.mcpHealthCheckScheduler = scheduler;
 
             // 注册 JVM 关闭钩子：确保退出时清理 MCP 子进程，防止僵尸进程
+            final MCPHealthCheckScheduler schedulerRef = scheduler;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                scheduler.stop();
+                schedulerRef.stop();
                 mcpService.shutdown();
             }, "MCP-ShutdownHook"));
         }
