@@ -729,7 +729,7 @@ public class AgentLoop {
         String output = result.getOutput();
         if (output != null && !output.trim().isEmpty()) {
             formatted.append("Result:\n");
-            formatted.append(ToolResultSummarizer.summarize(output));
+            formatted.append(ToolResultSummarizer.summarize(output, toolCall.getToolName()));
         } else {
             formatted.append("Operation completed successfully.");
         }
