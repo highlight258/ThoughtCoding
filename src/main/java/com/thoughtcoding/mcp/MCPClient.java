@@ -9,7 +9,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -26,6 +28,9 @@ public class MCPClient {
     private final Object ioLock = new Object();
 
     private Thread errorMonitorThread;
+    // 响应队列 + 独立读线程（替换 100ms 轮询）
+    private final BlockingQueue<String> responseQueue = new LinkedBlockingQueue<>();
+    private Thread readerThread;
 
     private boolean initialized = false;
     private final String serverName;
@@ -75,6 +80,9 @@ public class MCPClient {
 
             reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));
+
+            // 🔥 启动独立读线程，持续把服务端 stdout 读入响应队列
+            startReaderThread();
 
             // 等待进程启动
             log.debug("⏳ 等待 MCP 服务器启动...");
@@ -133,6 +141,26 @@ public class MCPClient {
         errorThread.setName("MCP-Error-" + serverName);
         errorThread.start();
         this.errorMonitorThread = errorThread;
+    }
+
+    /**
+     * 🔥 启动独立读线程，持续把服务端 stdout 读入响应队列（替换 100ms 轮询）。
+     * 进程退出时 readLine 返回 null，读线程自然退出。
+     */
+    private void startReaderThread() {
+        readerThread = new Thread(() -> {
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    responseQueue.offer(line);
+                }
+            } catch (Exception e) {
+                log.debug("MCP 读线程退出: {}", serverName);
+            }
+        });
+        readerThread.setDaemon(true);
+        readerThread.setName("MCP-Reader-" + serverName);
+        readerThread.start();
     }
 
     private void startOutputMonitoring() {
@@ -259,74 +287,51 @@ public class MCPClient {
     }
 
     private MCPResponse readResponse(long timeoutMs) throws IOException {
-        long startTime = System.currentTimeMillis();
-        int attemptCount = 0;
-
+        long deadline = System.currentTimeMillis() + timeoutMs;
         log.debug("⏳ 开始等待响应，超时时间: {}ms", timeoutMs);
 
-        while (System.currentTimeMillis() - startTime < timeoutMs) {
+        while (true) {
+            // 检查进程状态
+            if (process != null && !process.isAlive()) {
+                int exitCode = process.exitValue();
+                log.error("❌ MCP进程已退出，退出码: {}", exitCode);
+                throw new IOException("MCP进程异常退出");
+            }
+
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                log.error("❌ 读取响应超时 (等待了 {}ms)", timeoutMs);
+                throw new IOException("读取响应超时 (等待了 " + timeoutMs + "ms)");
+            }
+
+            String line;
             try {
-                attemptCount++;
-
-                // 检查进程状态
-                if (process != null && !process.isAlive()) {
-                    int exitCode = process.exitValue();
-                    log.error("❌ MCP进程已退出，退出码: {}", exitCode);
-                    throw new IOException("MCP进程异常退出");
-                }
-
-                // 非阻塞检查是否有数据可读
-                if (reader.ready()) {
-                    String line = reader.readLine();
-                    if (line != null) {
-                        line = line.trim();
-                        if (!line.isEmpty()) {
-                            log.debug("📨 收到数据 [尝试#{}]: {}", attemptCount, line);
-
-                            // 尝试解析为 JSON
-                            try {
-                                MCPResponse response = objectMapper.readValue(line, MCPResponse.class);
-                                log.debug("✅ 成功解析MCP响应 (耗时: {}ms)", System.currentTimeMillis() - startTime);
-                                return response;
-                            } catch (Exception e) {
-                                log.warn("⚠️ 响应不是有效JSON，继续等待: {}", line);
-                            }
-                        }
-                    }
-                } else {
-                    // 每500ms输出一次等待状态
-                    if (attemptCount % 5 == 0) {
-                        long elapsed = System.currentTimeMillis() - startTime;
-                        log.debug("⏳ 等待中... (已等待 {}ms / {}ms)", elapsed, timeoutMs);
-                    }
-                }
-
-                Thread.sleep(100);
-
+                line = responseQueue.poll(remaining, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 log.error("❌ 读取响应被中断");
                 throw new IOException("读取响应被中断");
             }
-        }
 
-        // 超时
-        long totalTime = System.currentTimeMillis() - startTime;
-        log.error("❌ 读取响应超时！总等待时间: {}ms, 尝试次数: {}", totalTime, attemptCount);
-
-        // 尝试最后一次读取
-        try {
-            if (reader.ready()) {
-                String line = reader.readLine();
-                if (line != null && !line.trim().isEmpty()) {
-                    log.error("❌ 超时前收到的最后数据: {}", line);
-                }
+            if (line == null) {
+                // poll 超时返回 null，回到循环顶部重新判断进程状态与剩余时间
+                continue;
             }
-        } catch (Exception e) {
-            log.debug("MCP 超时后最终读取失败（可忽略）: {}", e.getMessage());
-        }
 
-        throw new IOException("读取响应超时 (等待了 " + totalTime + "ms)");
+            line = line.trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+
+            log.debug("📨 收到数据: {}", line);
+            try {
+                MCPResponse response = objectMapper.readValue(line, MCPResponse.class);
+                log.debug("✅ 成功解析MCP响应");
+                return response;
+            } catch (Exception e) {
+                log.warn("⚠️ 响应不是有效JSON，继续等待: {}", line);
+            }
+        }
     }
 
     /**
