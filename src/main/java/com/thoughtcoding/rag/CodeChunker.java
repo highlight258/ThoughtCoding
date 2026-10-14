@@ -126,12 +126,11 @@ public class CodeChunker {
                 } else {
                     methodName = ctorM.group(2);
                 }
-                // 保存前一个 chunk（类级声明、导入等）
-                if (chunkBuf.length() > 0 && !currentType.equals("method")) {
+                // 保存前一个 chunk（类级声明、导入、或上一个方法）
+                if (chunkBuf.length() > 0) {
                     chunks.add(new Chunk(filePath, chunkStart, lineNum - 1,
                             chunkBuf.toString().trim(), currentType, currentName));
                 }
-                // 小方法合并到类级 chunk 中，除非是 10 行以上的大方法
                 currentType = "method";
                 currentName = methodName;
                 chunkStart = lineNum;
