@@ -2,6 +2,9 @@ package com.thoughtcoding.service;
 
 import com.thoughtcoding.config.AppConfig;
 import com.thoughtcoding.model.ChatMessage;
+import com.knuddels.jtokkit.Encodings;
+import com.knuddels.jtokkit.api.Encoding;
+import com.knuddels.jtokkit.api.EncodingType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,6 +28,10 @@ public class ContextManager {
     private static final int DEFAULT_MAX_HISTORY_TURNS = 10;  // 保留10轮（20条消息）
     private static final int DEFAULT_MAX_CONTEXT_TOKENS = 3000;  // 为历史预留3000 tokens
     private static final int DEFAULT_RESERVE_TOKENS = 1000;  // 为响应预留1000 tokens
+
+    // BPE 分词器（线程安全）。CL100K_BASE 是 OpenAI 系模型编码，对 DeepSeek/Qwen 为近似，但远优于字符比例启发式。
+    private static final Encoding TOKEN_ENCODING = Encodings.newDefaultEncodingRegistry()
+            .getEncoding(EncodingType.CL100K_BASE);
 
     // 策略枚举
     public enum Strategy {
@@ -352,38 +359,16 @@ public class ContextManager {
     }
 
     /**
-     * 估算文本的 Token 数量
-     * 简单方法：中文 2 字符 ≈ 1 token，英文 4 字符 ≈ 1 token
+     * 使用 BPE 分词器精确估算 Token 数量（非字符比例）。
      *
      * @param text 待估算的文本
-     * @return 估算的 token 数量
+     * @return token 数量
      */
-    private int estimateTokens(String text) {
+    static int estimateTokens(String text) {
         if (text == null || text.isEmpty()) {
             return 0;
         }
-
-        int chineseChars = 0;
-        int otherChars = 0;
-
-        for (char c : text.toCharArray()) {
-            if (isChinese(c)) {
-                chineseChars++;
-            } else {
-                otherChars++;
-            }
-        }
-
-        // 中文：2 字符 ≈ 1 token
-        // 英文：4 字符 ≈ 1 token
-        return (chineseChars / 2) + (otherChars / 4);
-    }
-
-    /**
-     * 判断字符是否为中文
-     */
-    private boolean isChinese(char c) {
-        return c >= 0x4E00 && c <= 0x9FA5;
+        return TOKEN_ENCODING.countTokens(text);
     }
 
     /**

@@ -54,6 +54,13 @@
       <version>${langchain4j.version}</version>
     </dependency>
 
+    <!-- BPE Token 计数（jtokkit） -->
+    <dependency>
+      <groupId>com.knuddels</groupId>
+      <artifactId>jtokkit</artifactId>
+      <version>1.1.0</version>
+    </dependency>
+
     <!-- 命令行解析 -->
     <dependency>
       <groupId>info.picocli</groupId>
