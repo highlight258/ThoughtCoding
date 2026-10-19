@@ -277,5 +277,9 @@ public class ContextManager {
         return String.format("Strategy: %s, MaxTurns: %d, MaxTokens: %d",
                 strategy, maxHistoryTurns, maxContextTokens);
     }
+
+    public int getMaxContextTokens() {
+        return maxContextTokens;
+    }
 }
 

@@ -113,7 +113,7 @@ public class LangChainService implements AIService {
         this.shouldStop = true;
     }
 
-    /** 构建请求消息：固定系统指令 + 对话历史 */
+    /** 构建请求消息：固定系统指令 + 按 token 预算裁剪后的对话历史 */
     private List<dev.langchain4j.data.message.ChatMessage> buildRequestMessages() {
         List<dev.langchain4j.data.message.ChatMessage> request = new ArrayList<>();
 
@@ -124,8 +124,26 @@ public class LangChainService implements AIService {
             }
         }
 
-        request.addAll(messages);
+        request.addAll(trimHistory(messages));
         return request;
+    }
+
+    /** 按 token 预算倒序裁剪历史（保留最近相关消息，系统提示词不参与裁剪） */
+    private List<dev.langchain4j.data.message.ChatMessage> trimHistory(
+            List<dev.langchain4j.data.message.ChatMessage> history) {
+        int maxTokens = contextManager != null ? contextManager.getMaxContextTokens() : 3000;
+        List<dev.langchain4j.data.message.ChatMessage> result = new ArrayList<>();
+        int totalTokens = 0;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            dev.langchain4j.data.message.ChatMessage msg = history.get(i);
+            int tokens = ContextManager.estimateTokens(msg.text());
+            if (totalTokens + tokens > maxTokens && !result.isEmpty()) {
+                break;
+            }
+            result.add(0, msg);
+            totalTokens += tokens;
+        }
+        return result;
     }
 
     /** 阻塞执行一次流式 generate，返回完整 AiMessage（含可能的工具调用请求） */
