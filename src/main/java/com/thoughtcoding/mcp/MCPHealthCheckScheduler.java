@@ -179,7 +179,14 @@ public class MCPHealthCheckScheduler {
                 return;
             }
 
-            // 4. 创建适配器并注册（MCPService 负责工具注册与清理）
+            // 4. 注册前再校验一次版本：连接过程中用户可能手动断开，避免旧重连结果被注册
+            if (state.getGeneration() != generation) {
+                log.warn("重连 {} 期间连接状态已变化，丢弃重连结果", serverName);
+                newClient.disconnect();
+                return;
+            }
+
+            // 5. 创建适配器并注册（MCPService 负责工具注册与清理）
             List<MCPToolAdapter> newAdapters = new ArrayList<>();
             for (MCPTool mcpTool : newMCPTools) {
                 newAdapters.add(new MCPToolAdapter(mcpTool, newClient));
