@@ -44,6 +44,7 @@ public class AgentLoop {
     public void loadHistory(List<ChatMessage> previousHistory) {
         if (previousHistory != null) {
             history.addAll(previousHistory);
+            context.getAiService().loadConversation(previousHistory);
         }
     }
 
@@ -64,8 +65,8 @@ public class AgentLoop {
             // 发起对话，function calling 循环由 LangChainService 内部完成
             context.getAiService().chat(input, modelName, this::executeTool);
 
-            // 保存会话
-            context.getSessionService().saveSession(sessionId, history);
+            // 保存会话（用 LangChainService 的完整对话，含 assistant 回复与工具执行记录）
+            context.getSessionService().saveSession(sessionId, context.getAiService().getConversation());
 
         } catch (Exception e) {
             context.getUi().displayError("Error processing input: " + e.getMessage());

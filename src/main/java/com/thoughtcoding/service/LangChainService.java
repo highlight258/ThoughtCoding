@@ -17,9 +17,11 @@ import dev.langchain4j.model.output.Response;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 /**
  * 基于 LangChain4j 原生 Function Calling 的 AI 服务实现。
@@ -193,5 +195,47 @@ public class LangChainService implements AIService {
     @Override
     public List<String> getAvailableModels() {
         return new ArrayList<>(appConfig.getModels().keySet());
+    }
+
+    @Override
+    public List<ChatMessage> getConversation() {
+        List<ChatMessage> result = new ArrayList<>();
+        for (dev.langchain4j.data.message.ChatMessage msg : messages) {
+            if (msg instanceof UserMessage) {
+                result.add(new ChatMessage("user", msg.text()));
+            } else if (msg instanceof AiMessage ai) {
+                if (ai.hasToolExecutionRequests()) {
+                    String names = ai.toolExecutionRequests().stream()
+                            .map(ToolExecutionRequest::name)
+                            .collect(Collectors.joining(", "));
+                    result.add(new ChatMessage("assistant", "[调用工具] " + names));
+                } else {
+                    result.add(new ChatMessage("assistant", ai.text()));
+                }
+            } else if (msg instanceof ToolExecutionResultMessage trm) {
+                result.add(ChatMessage.toolResult(trm.id(), trm.toolName(), trm.text()));
+            }
+            // SystemMessage 每轮动态构建，不持久化
+        }
+        return result;
+    }
+
+    @Override
+    public void loadConversation(List<ChatMessage> history) {
+        messages.clear();
+        if (history == null) {
+            return;
+        }
+        for (ChatMessage msg : history) {
+            switch (msg.getRole()) {
+                case "user" -> messages.add(UserMessage.from(msg.getContent()));
+                case "assistant" -> messages.add(AiMessage.from(msg.getContent()));
+                case "tool" -> messages.add(ToolExecutionResultMessage.from(
+                        msg.getToolCallId() != null ? msg.getToolCallId() : UUID.randomUUID().toString(),
+                        msg.getToolName() != null ? msg.getToolName() : "tool",
+                        msg.getContent()));
+                default -> { /* system 等历史消息忽略 */ }
+            }
+        }
     }
 }

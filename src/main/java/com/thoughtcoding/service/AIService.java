@@ -29,6 +29,12 @@ public interface AIService {
 
     List<String> getAvailableModels();
 
+    /** 导出完整对话历史（供 session 持久化），含 assistant 回复与工具执行记录 */
+    List<ChatMessage> getConversation();
+
+    /** 从持久化历史恢复对话 */
+    void loadConversation(List<ChatMessage> history);
+
     /** 工具执行器：执行一个工具调用请求，返回结果字符串 */
     @FunctionalInterface
     interface ToolExecutor {
