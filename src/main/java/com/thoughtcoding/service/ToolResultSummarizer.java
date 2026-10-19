@@ -21,6 +21,7 @@ import java.util.Comparator;
 public class ToolResultSummarizer {
 
     private static final int MAX_OUTPUT_LINES = 50;
+    private static final int MAX_OUTPUT_CHARS = 20_000;
     private static final int HEAD_LINES = 10;
     private static final int TAIL_LINES = 10;
     private static final int MAX_LINE_LENGTH = 500;
@@ -33,14 +34,17 @@ public class ToolResultSummarizer {
 
     /** 基于结构化 ToolResult 压缩：失败优先 stderr，成功压缩 stdout */
     public static String summarize(ToolResult result, String toolName) {
-        String text;
         if (result.isSuccess()) {
-            text = result.getOutput();
-        } else {
-            String stderr = result.getStderr();
-            text = (stderr != null && !stderr.isEmpty()) ? stderr : result.getError();
+            return summarizeText(result.getOutput(), toolName);
         }
-        return summarizeText(text, toolName);
+        String stderr = result.getStderr();
+        String text = (stderr != null && !stderr.isEmpty()) ? stderr : result.getError();
+        String summarized = summarizeText(text, toolName);
+        // 失败时固定带出退出码，避免模型只看到错误文本却不知道失败码
+        if (text != null && !text.isEmpty()) {
+            return "[退出码 " + result.getExitCode() + "]\n" + summarized;
+        }
+        return summarized;
     }
 
     /** 纯文本压缩（向后兼容，供测试与直接文本使用） */
@@ -53,26 +57,41 @@ public class ToolResultSummarizer {
             return text == null ? "" : text;
         }
 
+        boolean exceedsChars = text.length() > MAX_OUTPUT_CHARS;
         String[] lines = text.split("\n");
-        if (lines.length <= MAX_OUTPUT_LINES) {
+        if (!exceedsChars && lines.length <= MAX_OUTPUT_LINES) {
             return text;
         }
 
-        // 1. 落盘完整原文（无损可恢复）
+        // 1. 落盘完整原文（无损可恢复）。必须在截断之前，保证落盘的是完整原文
         String artifactPath = offload(text, toolName);
 
-        // 2. 头尾保留
+        // 2. 字符超限时先按字符截断出预览文本，再走头尾保留/行数压缩
+        String preview = exceedsChars ? text.substring(0, MAX_OUTPUT_CHARS) : text;
+        String[] previewLines = preview.split("\n");
+
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < Math.min(HEAD_LINES, lines.length); i++) {
-            sb.append(truncateLine(lines[i])).append('\n');
+        if (previewLines.length <= MAX_OUTPUT_LINES) {
+            // 行数不多但单行字符量巨大：回传字符截断后的预览（完整原文已落盘）
+            sb.append(preview)
+              .append("\n[输出超过 ").append(MAX_OUTPUT_CHARS).append(" 字符，已截断]");
+        } else {
+            // 头尾保留
+            for (int i = 0; i < Math.min(HEAD_LINES, previewLines.length); i++) {
+                sb.append(truncateLine(previewLines[i])).append('\n');
+            }
+            int omitted = Math.max(0, previewLines.length - HEAD_LINES - TAIL_LINES);
+            sb.append("... [省略 ").append(omitted).append(" 行] ...\n");
+            int tailStart = Math.max(HEAD_LINES, previewLines.length - TAIL_LINES);
+            for (int i = tailStart; i < previewLines.length; i++) {
+                sb.append(truncateLine(previewLines[i])).append('\n');
+            }
         }
-        int omitted = Math.max(0, lines.length - HEAD_LINES - TAIL_LINES);
-        sb.append("... [省略 ").append(omitted).append(" 行] ...\n");
-        int tailStart = Math.max(HEAD_LINES, lines.length - TAIL_LINES);
-        for (int i = tailStart; i < lines.length; i++) {
-            sb.append(truncateLine(lines[i])).append('\n');
+        sb.append("[完整输出 ");
+        if (exceedsChars) {
+            sb.append(text.length()).append(" 字符 / ");
         }
-        sb.append("[完整输出 ").append(lines.length).append(" 行已保存至 ")
+        sb.append(lines.length).append(" 行已保存至 ")
           .append(artifactPath).append("，需要时调用文件读取工具读取该文件查看]");
         return sb.toString();
     }
