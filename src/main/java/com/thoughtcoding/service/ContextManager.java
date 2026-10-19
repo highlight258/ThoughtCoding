@@ -4,6 +4,7 @@ import com.thoughtcoding.config.AppConfig;
 import com.thoughtcoding.model.ChatMessage;
 import com.knuddels.jtokkit.Encodings;
 import com.knuddels.jtokkit.api.Encoding;
+import com.knuddels.jtokkit.api.EncodingResult;
 import com.knuddels.jtokkit.api.EncodingType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -372,20 +373,17 @@ public class ContextManager {
     }
 
     /**
-     * 截断文本到指定 Token 限制
+     * 截断文本到指定 Token 限制（按真实 BPE token 精确截断，非字符近似）
      */
     private String truncateToTokenLimit(String text, int maxTokens) {
         if (estimateTokens(text) <= maxTokens) {
             return text;
         }
 
-        // 简单截断：取前 N 个字符
-        int targetChars = maxTokens * 3;  // 保守估计
-        if (text.length() <= targetChars) {
-            return text;
-        }
-
-        return text.substring(0, targetChars) + "\n\n[内容过长已截断...]";
+        // 编码时限制最大 token 数，再解码还原，保证截断后 token 数恰好不超限
+        EncodingResult result = TOKEN_ENCODING.encode(text, maxTokens);
+        String truncated = TOKEN_ENCODING.decode(result.getTokens());
+        return truncated + "\n\n[内容过长已截断...]";
     }
 
     /**
