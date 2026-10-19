@@ -103,7 +103,11 @@ public class CodebaseIndexer {
         // 恢复向量化器状态
         vectorizer.setState(existing.vectorizer);
 
+        // 已修改文件 + 新文件（目录 diff 发现）
         List<String> changed = store.findChangedFiles(projectRoot, entries);
+        List<String> newFiles = findNewFiles(projectRoot, entries);
+        changed.addAll(newFiles);
+
         if (changed.isEmpty()) {
             log.info("索引无需更新");
             return;
@@ -274,5 +278,60 @@ public class CodebaseIndexer {
             return rel;
         }
         return absPath;
+    }
+
+    /** 找出目录里有但索引里没有的新文件（相对路径） */
+    private List<String> findNewFiles(String projectRoot, List<VectorStore.IndexEntry> entries) throws IOException {
+        Set<String> indexedFiles = new HashSet<>();
+        for (VectorStore.IndexEntry entry : entries) {
+            indexedFiles.add(entry.filePath());
+        }
+        List<String> newFiles = new ArrayList<>();
+        for (String file : scanCodeFiles(projectRoot)) {
+            if (!indexedFiles.contains(file)) {
+                newFiles.add(file);
+            }
+        }
+        return newFiles;
+    }
+
+    /** 扫描项目目录，返回所有代码文件的相对路径（不读内容，供新文件 diff 使用） */
+    private List<String> scanCodeFiles(String projectRoot) throws IOException {
+        List<String> codeFiles = new ArrayList<>();
+        Path root = Paths.get(projectRoot);
+        String projectRootAbs = root.toAbsolutePath().toString();
+
+        try (Stream<Path> children = Files.list(root)) {
+            children
+                .filter(Files::isDirectory)
+                .filter(dir -> !chunker.shouldExcludeDir(dir.getFileName().toString()))
+                .forEach(dir -> scanDirForCodeFiles(dir, root, codeFiles, projectRootAbs));
+        } catch (IOException e) {
+            log.warn("无法扫描项目目录: {}", projectRoot, e);
+        }
+
+        // 根目录下的代码文件
+        try (Stream<Path> rootFiles = Files.list(root)) {
+            rootFiles
+                .filter(Files::isRegularFile)
+                .filter(p -> chunker.isCodeFile(p.getFileName().toString()))
+                .forEach(filePath -> codeFiles.add(makeRelative(projectRootAbs, filePath.toString())));
+        } catch (IOException e) {
+            log.warn("无法扫描根目录文件: {}", projectRoot, e);
+        }
+
+        return codeFiles;
+    }
+
+    private void scanDirForCodeFiles(Path dir, Path root, List<String> codeFiles, String projectRootAbs) {
+        try (Stream<Path> stream = Files.walk(dir)) {
+            stream
+                .filter(Files::isRegularFile)
+                .filter(p -> !isExcluded(p, root))
+                .filter(p -> chunker.isCodeFile(p.getFileName().toString()))
+                .forEach(filePath -> codeFiles.add(makeRelative(projectRootAbs, filePath.toString())));
+        } catch (IOException e) {
+            log.debug("跳过目录: {}", dir, e);
+        }
     }
 }
