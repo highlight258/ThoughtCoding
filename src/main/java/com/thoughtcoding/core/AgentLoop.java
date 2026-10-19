@@ -1,6 +1,8 @@
 package com.thoughtcoding.core;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thoughtcoding.model.ChatMessage;
+import com.thoughtcoding.model.ToolExecution;
 import com.thoughtcoding.model.ToolResult;
 import com.thoughtcoding.service.PerformanceMonitor;
 import com.thoughtcoding.service.ToolResultSummarizer;
@@ -9,6 +11,7 @@ import dev.langchain4j.agent.tool.ToolExecutionRequest;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 管理 AI 交互的核心循环。
@@ -23,6 +26,8 @@ public class AgentLoop {
     private final String modelName;
     private final ToolExecutionConfirmation confirmation;
     private final OptionManager optionManager;
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     public AgentLoop(ThoughtCodingContext context, String sessionId, String modelName) {
         this.context = context;
@@ -115,10 +120,61 @@ public class AgentLoop {
             return "工具不存在: " + request.name();
         }
 
+        // 有副作用的工具执行前确认（autoApprove 模式跳过）
+        if (isDangerousTool(request) && !confirmation.isAutoApproveMode()) {
+            if (!confirmToolExecution(request)) {
+                return "用户取消了工具执行";
+            }
+        }
+
         String toolInput = convertArgumentsToInput(request);
         ToolResult result = tool.execute(toolInput);
 
         return ToolResultSummarizer.summarize(result, request.name());
+    }
+
+    /** 判断工具是否可能有副作用（只读检索工具无需确认） */
+    private boolean isDangerousTool(ToolExecutionRequest request) {
+        String name = request.name();
+        if (name.equals("grep_search") || name.equals("codebase_search")) {
+            return false;
+        }
+        if (name.equals("file_manager")) {
+            // read/list/info 只读；write/delete/create 有副作用
+            return isMutatingFileCommand(request.arguments());
+        }
+        return true;  // command_executor、code_executor、MCP 工具都确认
+    }
+
+    /** 判断 file_manager 的 command 是否是修改操作 */
+    private boolean isMutatingFileCommand(String argumentsJson) {
+        try {
+            Map<String, Object> args = OBJECT_MAPPER.readValue(argumentsJson, Map.class);
+            Object command = args.get("command");
+            if (command == null) {
+                return true;
+            }
+            String cmd = command.toString().toLowerCase();
+            return cmd.equals("write") || cmd.equals("delete") || cmd.equals("create");
+        } catch (Exception e) {
+            return true;  // 解析失败，保守确认
+        }
+    }
+
+    /** 弹出确认框，返回用户是否同意执行 */
+    private boolean confirmToolExecution(ToolExecutionRequest request) {
+        try {
+            Map<String, Object> params = OBJECT_MAPPER.readValue(request.arguments(), Map.class);
+            ToolExecution execution = new ToolExecution(
+                request.name(),
+                "执行 " + request.name() + " 工具",
+                params,
+                true
+            );
+            return confirmation.askConfirmation(execution);
+        } catch (Exception e) {
+            return true;  // 参数解析失败，交给工具自身返回参数错误
+        }
     }
 
     /**
