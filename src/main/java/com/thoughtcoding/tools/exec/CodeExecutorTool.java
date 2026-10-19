@@ -9,6 +9,7 @@ import javax.tools.ToolProvider;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.util.Map;
@@ -112,35 +113,17 @@ public class CodeExecutorTool extends BaseTool {
                 }
 
                 // 执行编译后的类
-                ProcessBuilder processBuilder = new ProcessBuilder(
-                    "java", "-cp", tempDir.getAbsolutePath(), className
+                ToolResult result = runProcess(
+                    new ProcessBuilder("java", "-cp", tempDir.getAbsolutePath(), className),
+                    startTime
                 );
-                processBuilder.redirectErrorStream(true);
-
-                Process process = processBuilder.start();
-                try {
-                    StringBuilder output = new StringBuilder();
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            output.append(line).append("\n");
-                        }
-                    }
-
-                    int exitCode = process.waitFor();
-                    String result = output.toString().trim();
-
-                    if (exitCode != 0) {
-                        return error("Java execution failed:\n" + result, System.currentTimeMillis() - startTime);
-                    }
-
-                    return success(result.isEmpty() ? "Java code executed successfully (no output)" : result,
-                            System.currentTimeMillis() - startTime);
-                } finally {
-                    if (process.isAlive()) {
-                        process.destroy();
-                    }
+                if (result.isSuccess() && (result.getOutput() == null || result.getOutput().isEmpty())) {
+                    return success("Java code executed successfully (no output)", result.getExecutionTime());
                 }
+                if (!result.isSuccess()) {
+                    return error("Java execution failed:\n" + result.getError(), result.getExecutionTime());
+                }
+                return result;
 
             } finally {
                 // 清理临时文件
@@ -185,6 +168,52 @@ public class CodeExecutorTool extends BaseTool {
         }
     }
 
+    /**
+     * 执行进程并分离收集 stdout/stderr，按退出码构造结构化结果。
+     */
+    private ToolResult runProcess(ProcessBuilder pb, long startTime) {
+        pb.redirectErrorStream(false);
+        try {
+            Process process = pb.start();
+            try {
+                StringBuilder stdout = new StringBuilder();
+                StringBuilder stderr = new StringBuilder();
+                Thread outThread = readStreamAsync(process.getInputStream(), stdout);
+                Thread errThread = readStreamAsync(process.getErrorStream(), stderr);
+
+                int exitCode = process.waitFor();
+                outThread.join();
+                errThread.join();
+
+                return ToolResult.command(stdout.toString().trim(), stderr.toString().trim(),
+                        exitCode, System.currentTimeMillis() - startTime);
+            } finally {
+                if (process.isAlive()) {
+                    process.destroy();
+                }
+            }
+        } catch (Exception e) {
+            return error("Process execution failed: " + e.getMessage(),
+                    System.currentTimeMillis() - startTime);
+        }
+    }
+
+    /** 异步读取流到 StringBuilder，返回读线程（用于并发读取 stdout/stderr 避免死锁） */
+    private Thread readStreamAsync(InputStream in, StringBuilder sb) {
+        Thread t = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append("\n");
+                }
+            } catch (Exception e) {
+                // 忽略流读取错误
+            }
+        });
+        t.start();
+        return t;
+    }
+
     private ToolResult executeJavaScript(String code, long startTime) {
         try {
             // 通过 Node.js 执行 JavaScript 代码
@@ -194,38 +223,19 @@ public class CodeExecutorTool extends BaseTool {
                 Files.writeString(tempFile.toPath(), code);
 
                 // 尝试使用 node 命令
-                ProcessBuilder processBuilder = new ProcessBuilder("node", tempFile.getAbsolutePath());
-                processBuilder.redirectErrorStream(true);
-
-                Process process = processBuilder.start();
-                try {
-                    StringBuilder output = new StringBuilder();
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            output.append(line).append("\n");
-                        }
+                ToolResult result = runProcess(new ProcessBuilder("node", tempFile.getAbsolutePath()), startTime);
+                if (!result.isSuccess()) {
+                    String err = result.getError();
+                    if (err != null && (err.contains("Cannot run program") || err.contains("command not found") || err.contains("'node' is not recognized"))) {
+                        return error("Node.js is not installed or not in PATH. Please install Node.js to execute JavaScript code.",
+                                result.getExecutionTime());
                     }
-
-                    int exitCode = process.waitFor();
-                    String result = output.toString().trim();
-
-                    if (exitCode != 0) {
-                        // 如果失败，可能是因为没有安装 Node.js
-                        if (result.isEmpty() || result.contains("command not found") || result.contains("'node' is not recognized")) {
-                            return error("Node.js is not installed or not in PATH. Please install Node.js to execute JavaScript code.",
-                                    System.currentTimeMillis() - startTime);
-                        }
-                        return error("JavaScript execution failed:\n" + result, System.currentTimeMillis() - startTime);
-                    }
-
-                    return success(result.isEmpty() ? "JavaScript code executed successfully (no output)" : result,
-                            System.currentTimeMillis() - startTime);
-                } finally {
-                    if (process.isAlive()) {
-                        process.destroy();
-                    }
+                    return error("JavaScript execution failed:\n" + err, result.getExecutionTime());
                 }
+                if (result.getOutput() == null || result.getOutput().isEmpty()) {
+                    return success("JavaScript code executed successfully (no output)", result.getExecutionTime());
+                }
+                return result;
 
             } finally {
                 tempFile.delete();
@@ -249,33 +259,14 @@ public class CodeExecutorTool extends BaseTool {
             try {
                 Files.writeString(tempFile.toPath(), code);
 
-                ProcessBuilder processBuilder = new ProcessBuilder("python", tempFile.getAbsolutePath());
-                processBuilder.redirectErrorStream(true);
-
-                Process process = processBuilder.start();
-                try {
-                    StringBuilder output = new StringBuilder();
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            output.append(line).append("\n");
-                        }
-                    }
-
-                    int exitCode = process.waitFor();
-                    String result = output.toString().trim();
-
-                    if (exitCode != 0) {
-                        return error("Python execution failed:\n" + result, System.currentTimeMillis() - startTime);
-                    }
-
-                    return success(result.isEmpty() ? "Python code executed successfully (no output)" : result,
-                            System.currentTimeMillis() - startTime);
-                } finally {
-                    if (process.isAlive()) {
-                        process.destroy();
-                    }
+                ToolResult result = runProcess(new ProcessBuilder("python", tempFile.getAbsolutePath()), startTime);
+                if (result.isSuccess() && (result.getOutput() == null || result.getOutput().isEmpty())) {
+                    return success("Python code executed successfully (no output)", result.getExecutionTime());
                 }
+                if (!result.isSuccess()) {
+                    return error("Python execution failed:\n" + result.getError(), result.getExecutionTime());
+                }
+                return result;
 
             } finally {
                 tempFile.delete();
