@@ -2,17 +2,13 @@ package com.thoughtcoding.core;
 
 import com.thoughtcoding.model.ChatMessage;
 import com.thoughtcoding.model.ToolResult;
-import com.thoughtcoding.mcp.MCPToolAdapter;
 import com.thoughtcoding.service.PerformanceMonitor;
 import com.thoughtcoding.service.ToolResultSummarizer;
 import com.thoughtcoding.tools.BaseTool;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 /**
  * 管理 AI 交互的核心循环。
@@ -27,8 +23,6 @@ public class AgentLoop {
     private final String modelName;
     private final ToolExecutionConfirmation confirmation;
     private final OptionManager optionManager;
-
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     public AgentLoop(ThoughtCodingContext context, String sessionId, String modelName) {
         this.context = context;
@@ -127,34 +121,15 @@ public class AgentLoop {
     }
 
     /**
-     * 将 function calling 的 JSON arguments 转换为工具可接受的输入字符串。
-     * 支持 JSON 的工具直接透传；仅支持空格分隔的工具按类型组装。
+     * 将 function calling 的 JSON arguments 透传给工具。
+     * 所有工具均原生支持 JSON 输入。
      */
     private String convertArgumentsToInput(ToolExecutionRequest request) {
         String argsJson = request.arguments();
         if (argsJson == null || argsJson.isBlank()) {
             return "";
         }
-
-        // 支持 JSON 输入的工具直接透传 JSON
-        if (request.name().equals("file_manager")
-                || request.name().equals("command_executor")
-                || context.getToolRegistry().getTool(request.name()) instanceof MCPToolAdapter) {
-            return argsJson;
-        }
-
-        // 其余工具：解析 JSON 组装成空格分隔字符串
-        try {
-            Map<String, Object> args = OBJECT_MAPPER.readValue(argsJson, Map.class);
-            return switch (request.name()) {
-                case "code_executor" -> args.get("language") + " " + args.get("code");
-                case "grep_search" -> args.get("pattern") + " " + args.get("path");
-                case "codebase_search" -> String.valueOf(args.get("query"));
-                default -> argsJson;
-            };
-        } catch (Exception e) {
-            return argsJson;
-        }
+        return argsJson;
     }
 
     /** 设置自动批准模式（用于批量操作） */

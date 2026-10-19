@@ -9,6 +9,7 @@ import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -28,13 +29,34 @@ public class GrepSearchTool extends BaseTool {
         long startTime = System.currentTimeMillis();
 
         try {
-            String[] parts = input.split(" ", 2);
-            if (parts.length < 2) {
-                return error("Invalid format. Use: <pattern> <path>", System.currentTimeMillis() - startTime);
-            }
+            String pattern;
+            String searchPath;
 
-            String pattern = parts[0];
-            String searchPath = parts[1];
+            // 支持 JSON 格式输入（function calling）
+            if (input.trim().startsWith("{")) {
+                com.fasterxml.jackson.databind.ObjectMapper mapper =
+                        new com.fasterxml.jackson.databind.ObjectMapper();
+                Map<String, Object> params = mapper.readValue(input, Map.class);
+
+                Object patternValue = params.get("pattern");
+                Object pathValue = params.get("path");
+                if (patternValue == null || pathValue == null) {
+                    return error("JSON格式错误: 需要 'pattern' 和 'path' 字段",
+                            System.currentTimeMillis() - startTime);
+                }
+
+                pattern = patternValue.toString();
+                searchPath = pathValue.toString();
+            } else {
+                // 空格分隔格式（向后兼容）
+                String[] parts = input.split(" ", 2);
+                if (parts.length < 2) {
+                    return error("Invalid format. Use: <pattern> <path>", System.currentTimeMillis() - startTime);
+                }
+
+                pattern = parts[0];
+                searchPath = parts[1];
+            }
 
             Path path = Paths.get(searchPath).toAbsolutePath();
 

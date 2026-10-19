@@ -11,6 +11,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
+import java.util.Map;
 
 /**
  * 代码执行工具，支持多种编程语言的代码片段执行
@@ -28,14 +29,34 @@ public class CodeExecutorTool extends BaseTool {
         long startTime = System.currentTimeMillis();
 
         try {
-            // 解析语言和代码
-            String[] parts = input.split(" ", 2);
-            if (parts.length < 2) {
-                return error("Invalid format. Use: <language> <code>", System.currentTimeMillis() - startTime);
-            }
+            String language;
+            String code;
 
-            String language = parts[0].toLowerCase();
-            String code = parts[1];
+            // 支持 JSON 格式输入（function calling）
+            if (input.trim().startsWith("{")) {
+                com.fasterxml.jackson.databind.ObjectMapper mapper =
+                        new com.fasterxml.jackson.databind.ObjectMapper();
+                Map<String, Object> params = mapper.readValue(input, Map.class);
+
+                Object languageValue = params.get("language");
+                Object codeValue = params.get("code");
+                if (languageValue == null || codeValue == null) {
+                    return error("JSON格式错误: 需要 'language' 和 'code' 字段",
+                            System.currentTimeMillis() - startTime);
+                }
+
+                language = languageValue.toString().toLowerCase();
+                code = codeValue.toString();
+            } else {
+                // 空格分隔格式（向后兼容）
+                String[] parts = input.split(" ", 2);
+                if (parts.length < 2) {
+                    return error("Invalid format. Use: <language> <code>", System.currentTimeMillis() - startTime);
+                }
+
+                language = parts[0].toLowerCase();
+                code = parts[1];
+            }
 
             switch (language) {
                 case "java":

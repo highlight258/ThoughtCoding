@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 代码库语义搜索工具 — 使用 RAG 从代码库中检索相关代码片段。
@@ -43,6 +44,22 @@ public class CodebaseSearchTool extends BaseTool {
     @Override
     public ToolResult execute(String query) {
         long startTime = System.currentTimeMillis();
+
+        // 支持 JSON 格式输入（function calling）
+        if (query != null && query.trim().startsWith("{")) {
+            try {
+                com.fasterxml.jackson.databind.ObjectMapper mapper =
+                        new com.fasterxml.jackson.databind.ObjectMapper();
+                Map<String, Object> params = mapper.readValue(query, Map.class);
+                Object queryValue = params.get("query");
+                if (queryValue != null) {
+                    query = queryValue.toString();
+                }
+            } catch (Exception e) {
+                // 解析失败时退回原字符串查询（向后兼容）
+                log.debug("JSON 查询参数解析失败，按原始字符串处理: {}", e.getMessage());
+            }
+        }
 
         try {
             // 确保索引存在
