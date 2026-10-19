@@ -1,5 +1,6 @@
 package com.thoughtcoding.mcp;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.thoughtcoding.config.AppConfig;
@@ -10,10 +11,11 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.util.*;
-import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * MCP客户端，管理与单个MCP服务器的连接和通信
@@ -29,10 +31,8 @@ public class MCPClient {
     private final Object ioLock = new Object();
 
     private Thread errorMonitorThread;
-    // 响应队列 + 独立读线程（替换 100ms 轮询）
-    // 有界队列：防止服务端异常刷屏时内存无限增长；满时读线程阻塞形成背压
-    private static final int RESPONSE_QUEUE_CAPACITY = 1024;
-    private final BlockingQueue<String> responseQueue = new LinkedBlockingQueue<>(RESPONSE_QUEUE_CAPACITY);
+    // 独立读线程 + 按请求 id 匹配的挂起请求表
+    private final Map<String, CompletableFuture<MCPResponse>> pendingRequests = new ConcurrentHashMap<>();
     private Thread readerThread;
 
     // 进程启动等待上限（轮询存活状态，秒退时快速失败）
@@ -156,7 +156,7 @@ public class MCPClient {
     }
 
     /**
-     * 🔥 启动独立读线程，持续把服务端 stdout 读入响应队列（替换 100ms 轮询）。
+     * 🔥 启动独立读线程：持续读取服务端 stdout，解析后按请求 id 分发给等待中的调用方。
      * 进程退出时 readLine 返回 null，读线程自然退出。
      */
     private void startReaderThread() {
@@ -164,13 +164,10 @@ public class MCPClient {
             try {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    responseQueue.put(line);
+                    dispatchLine(line);
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.debug("MCP 读线程被中断: {}", serverName);
             } catch (Exception e) {
-                log.debug("MCP 读线程退出: {}", serverName);
+                log.debug("MCP 读线程退出: {} ({})", serverName, e.getMessage());
             }
         });
         readerThread.setDaemon(true);
@@ -202,19 +199,12 @@ public class MCPClient {
 
             log.debug("发送初始化请求...");
 
-            // 使用 MCPRequest 确保正确序列化
+            // 使用 MCPRequest 确保正确序列化（id 由构造器生成 UUID）
             MCPRequest request = new MCPRequest("initialize", params);
-            request.setId("1");  // 使用字符串 ID
-
-            String json = objectMapper.writeValueAsString(request);
-            log.debug("发送的JSON: {}", json);
-            writer.write(json);
-            writer.newLine();
-            writer.flush();
 
             // 读取并记录所有输出，用于调试
             log.debug("等待MCP服务器响应...");
-            MCPResponse response = readResponse(15000);
+            MCPResponse response = sendAndWait(request, 15000);
 
             if (response != null) {
                 log.debug("收到初始化响应: {}", response);
@@ -244,9 +234,8 @@ public class MCPClient {
 
     private void listTools() throws IOException {
         MCPRequest request = new MCPRequest("tools/list", Map.of());
-        sendRequest(request);
 
-        MCPResponse response = readResponse(3000);
+        MCPResponse response = sendAndWait(request, 3000);
         if (response != null && response.getResult() instanceof Map) {
             @SuppressWarnings("unchecked")
             Map<String, Object> result = (Map<String, Object>) response.getResult();
@@ -283,8 +272,7 @@ public class MCPClient {
                     Map.of("name", toolName, "arguments", arguments)
             );
 
-            sendRequest(request);
-            MCPResponse response = readResponse(30000);
+            MCPResponse response = sendAndWait(request, 30000);
 
             if (response != null) {
                 if (response.getError() != null) {
@@ -327,51 +315,70 @@ public class MCPClient {
         log.debug("发送MCP通知[{}]: {}", serverName, json);
     }
 
-    private MCPResponse readResponse(long timeoutMs) throws IOException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        log.debug("⏳ 开始等待响应，超时时间: {}ms", timeoutMs);
+    /**
+     * 解析服务端输出的一行，并按 JSON-RPC id 分发给对应的挂起请求。
+     * - 有 id：响应，按 id 匹配 Future 并完成；匹配不到（迟到/未知）则丢弃
+     * - 无 id：通知，当前仅记录日志
+     */
+    private void dispatchLine(String line) {
+        if (line == null) {
+            return;
+        }
+        line = line.trim();
+        if (line.isEmpty()) {
+            return;
+        }
 
-        while (true) {
-            // 检查进程状态
-            if (process != null && !process.isAlive()) {
-                int exitCode = process.exitValue();
-                log.error("❌ MCP进程已退出，退出码: {}", exitCode);
-                throw new IOException("MCP进程异常退出");
-            }
+        JsonNode node;
+        try {
+            node = objectMapper.readTree(line);
+        } catch (Exception e) {
+            log.warn("⚠️ MCP 输出不是有效 JSON，已忽略: {}", line);
+            return;
+        }
 
-            long remaining = deadline - System.currentTimeMillis();
-            if (remaining <= 0) {
-                log.error("❌ 读取响应超时 (等待了 {}ms)", timeoutMs);
-                throw new IOException("读取响应超时 (等待了 " + timeoutMs + "ms)");
-            }
+        JsonNode idNode = node.get("id");
+        if (idNode == null || idNode.isNull()) {
+            JsonNode methodNode = node.get("method");
+            log.debug("📨 收到 MCP 通知（无 id），已忽略: method={}", methodNode);
+            return;
+        }
 
-            String line;
-            try {
-                line = responseQueue.poll(remaining, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.error("❌ 读取响应被中断");
-                throw new IOException("读取响应被中断");
+        try {
+            MCPResponse response = objectMapper.treeToValue(node, MCPResponse.class);
+            String id = response.getId();
+            CompletableFuture<MCPResponse> future = pendingRequests.remove(id);
+            if (future != null) {
+                log.debug("✅ 按 id 分发 MCP 响应: {}", id);
+                future.complete(response);
+            } else {
+                log.warn("⚠️ 收到未知或迟到的 MCP 响应，已丢弃: id={}", id);
             }
+        } catch (Exception e) {
+            log.warn("⚠️ MCP 响应解析失败，已丢弃: {}", line);
+        }
+    }
 
-            if (line == null) {
-                // poll 超时返回 null，回到循环顶部重新判断进程状态与剩余时间
-                continue;
-            }
-
-            line = line.trim();
-            if (line.isEmpty()) {
-                continue;
-            }
-
-            log.debug("📨 收到数据: {}", line);
-            try {
-                MCPResponse response = objectMapper.readValue(line, MCPResponse.class);
-                log.debug("✅ 成功解析MCP响应");
-                return response;
-            } catch (Exception e) {
-                log.warn("⚠️ 响应不是有效JSON，继续等待: {}", line);
-            }
+    /**
+     * 发送请求并等待与其 id 匹配的响应。
+     * 无论正常、超时、中断还是发送失败，都会清理 pendingRequests 中的条目。
+     */
+    private MCPResponse sendAndWait(MCPRequest request, long timeoutMs) throws IOException {
+        String id = request.getId();
+        CompletableFuture<MCPResponse> future = new CompletableFuture<>();
+        pendingRequests.put(id, future);
+        try {
+            sendRequest(request);
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            throw new IOException("读取响应超时 (" + timeoutMs + "ms)");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("读取响应被中断");
+        } catch (ExecutionException e) {
+            throw new IOException("等待响应失败: " + e.getCause().getMessage());
+        } finally {
+            pendingRequests.remove(id);
         }
     }
 
@@ -387,8 +394,7 @@ public class MCPClient {
         synchronized (ioLock) {
             try {
                 MCPRequest req = new MCPRequest("ping", null);
-                sendRequest(req);
-                MCPResponse resp = readResponse(timeoutMs);
+                MCPResponse resp = sendAndWait(req, timeoutMs);
                 return resp != null && resp.getError() == null;
             } catch (Exception e) {
                 log.debug("Ping 失败: {}", serverName, e.getMessage());
