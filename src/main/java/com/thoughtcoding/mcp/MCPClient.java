@@ -1,6 +1,7 @@
 package com.thoughtcoding.mcp;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.thoughtcoding.config.AppConfig;
 import com.thoughtcoding.mcp.model.*;
 import lombok.extern.slf4j.Slf4j;
@@ -218,6 +219,14 @@ public class MCPClient {
             if (response != null) {
                 log.debug("收到初始化响应: {}", response);
                 if (response.getError() == null) {
+                    // MCP 握手最后一步：发送 notifications/initialized 通知（无 id，服务端不回复）
+                    try {
+                        sendNotification("notifications/initialized", null);
+                        log.debug("✅ 已发送 notifications/initialized 通知");
+                    } catch (Exception e) {
+                        // 通知发送失败不影响主流程（严格服务端可能仍会拒绝后续请求，但此处不中断）
+                        log.warn("⚠️ 发送 initialized 通知失败（已忽略）: {}", e.getMessage());
+                    }
                     log.debug("✅ MCP协议初始化成功");
                     return true;
                 } else {
@@ -298,6 +307,24 @@ public class MCPClient {
         writer.newLine();
         writer.flush();
         log.debug("发送MCP请求[{}]: {}", serverName, json);
+    }
+
+    /**
+     * 发送 JSON-RPC 通知（notification）。
+     * 通知不带 id 字段，服务端不返回响应；因此不能复用 MCPRequest（其 id 字段会序列化为 null）。
+     */
+    private void sendNotification(String method, Object params) throws IOException {
+        ObjectNode notification = objectMapper.createObjectNode();
+        notification.put("jsonrpc", "2.0");
+        notification.put("method", method);
+        if (params != null) {
+            notification.set("params", objectMapper.valueToTree(params));
+        }
+        String json = objectMapper.writeValueAsString(notification);
+        writer.write(json);
+        writer.newLine();
+        writer.flush();
+        log.debug("发送MCP通知[{}]: {}", serverName, json);
     }
 
     private MCPResponse readResponse(long timeoutMs) throws IOException {
