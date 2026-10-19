@@ -4,14 +4,17 @@ import com.thoughtcoding.model.ChatMessage;
 import com.thoughtcoding.model.ToolCall;
 import com.thoughtcoding.model.ToolExecution;
 import com.thoughtcoding.model.ToolResult;
+import com.thoughtcoding.mcp.MCPToolAdapter;
 import com.thoughtcoding.service.PerformanceMonitor;
 import com.thoughtcoding.service.ToolResultSummarizer;
 import com.thoughtcoding.tools.BaseTool;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 在ThoughtCodingCommand中管理AI交互的核心循环
@@ -35,14 +38,6 @@ public class AgentLoop {
     private final OptionManager optionManager;  // 🔥 新增：选项管理器
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final int MAX_REACT_ITERATIONS = 10;
-
-    // 🔥 完成操作类断言关键词（用于对账检测疑似幻觉）
-    private static final List<String> COMPLETION_CLAIMS = List.of(
-        "已创建", "创建完成", "创建成功", "已生成", "生成成功", "已写入", "写入成功",
-        "已保存", "保存成功", "已删除", "删除成功", "已修改", "修改成功", "已执行",
-        "created", "successfully", "wrote", "completed"
-    );
 
     public AgentLoop(ThoughtCodingContext context, String sessionId, String modelName) {
         this.context = context;
@@ -59,9 +54,8 @@ public class AgentLoop {
         // 🔥 创建选项管理器
         this.optionManager = new OptionManager();
 
-        // 设置消息和工具调用处理器
+        // 设置消息处理器（流式文本回调）
         context.getAiService().setMessageHandler(this::handleMessage);
-        context.getAiService().setToolCallHandler(this::handleToolCall);
     }
 
     public void loadHistory(List<ChatMessage> previousHistory) {
@@ -80,41 +74,12 @@ public class AgentLoop {
                 return;
             }
 
-            // 添加用户消息到历史（只加一次，不在循环内重复添加）
+            // 添加用户消息到历史（用于持久化）
             ChatMessage userMessage = new ChatMessage("user", input);
             history.add(userMessage);
 
-            // ReAct 循环：Reason → Act → Observe → Reason → ...
-            int iteration = 0;
-            boolean toolExecutedThisTurn = false;
-            while (iteration < MAX_REACT_ITERATIONS) {
-                iteration++;
-
-                // 重置待处理的工具调用
-                pendingToolCall = null;
-
-                // 首轮传用户原始输入，后续轮传空字符串（AI 从 history 中读取上下文）
-                String promptForThisRound = (iteration == 1) ? input : "";
-                context.getAiService().streamingChat(promptForThisRound, history, modelName);
-
-                // AI 没有请求工具调用 → 推理完成，退出循环
-                if (pendingToolCall == null) {
-                    break;
-                }
-
-                // 执行工具调用，结果会写入 history
-                boolean toolExecuted = executeReActToolCall();
-                if (toolExecuted) {
-                    toolExecutedThisTurn = true;
-                } else {
-                    break;
-                }
-            }
-
-            // 🔥 对账机制：AI 声称完成操作但本轮未执行任何工具 → 疑似幻觉
-            if (!toolExecutedThisTurn) {
-                detectAndFlagPossibleHallucination();
-            }
+            // 发起对话，function calling 循环由 LangChainService 内部完成
+            context.getAiService().chat(input, modelName, this::executeTool);
 
             // 保存会话
             context.getSessionService().saveSession(sessionId, history);
@@ -166,138 +131,53 @@ public class AgentLoop {
         // 这样可以避免历史记录中出现大量零散的 token 消息
     }
 
-    // 用于缓存工具调用，等待 AI 响应完成后再执行
-    private volatile ToolCall pendingToolCall = null;
+    /**
+     * 执行一个工具调用请求（供 LangChainService 的 function calling 循环回调）。
+     * 返回工具执行结果字符串，供回传给模型。
+     */
+    private String executeTool(ToolExecutionRequest request) {
+        BaseTool tool = context.getToolRegistry().getTool(request.name());
+        if (tool == null) {
+            return "工具不存在: " + request.name();
+        }
 
-    private void handleToolCall(ToolCall toolCall) {
-        // 🔥 不再显示工具调用通知（已在流式输出中显示）
-        // context.getUi().displayToolCall(toolCall);
+        String toolInput = convertArgumentsToInput(request);
+        ToolResult result = tool.execute(toolInput);
 
-        // 🔥 缓存工具调用，不立即执行（等待 AI 流式输出完成）
-        this.pendingToolCall = toolCall;
+        if (result.isSuccess()) {
+            return ToolResultSummarizer.summarize(result.getOutput(), request.name());
+        }
+        return "执行失败: " + result.getError();
     }
 
     /**
-     * ReAct 循环中的工具执行：简化确认 + 执行 + 写入 history。
-     * @return true 表示工具执行成功且结果已写入 history，可继续循环
+     * 将 function calling 的 JSON arguments 转换为工具可接受的输入字符串。
+     * 支持 JSON 的工具直接透传；仅支持空格分隔的工具按类型组装。
      */
-    private boolean executeReActToolCall() {
-        if (pendingToolCall == null) {
-            return false;
+    private String convertArgumentsToInput(ToolExecutionRequest request) {
+        String argsJson = request.arguments();
+        if (argsJson == null || argsJson.isBlank()) {
+            return "";
         }
 
+        // 支持 JSON 输入的工具直接透传 JSON
+        if (request.name().equals("file_manager")
+                || request.name().equals("command_executor")
+                || context.getToolRegistry().getTool(request.name()) instanceof MCPToolAdapter) {
+            return argsJson;
+        }
+
+        // 其余工具：解析 JSON 组装成空格分隔字符串
         try {
-            // 流式输出中已显示工具调用详情，这里只需简单确认
-            boolean confirmed = confirmation.askSimpleConfirmation();
-            if (!confirmed) {
-                return false;
-            }
-            return executeToolCall(pendingToolCall);
-        } finally {
-            pendingToolCall = null;
-        }
-    }
-
-    /**
-     * 🔥 对账机制：AI 声称完成操作但本轮未执行任何工具时，提示疑似幻觉。
-     * 解决「正则漏检 → 静默失败」问题，把漏检从不可见变为可发现、可纠正。
-     *
-     * 启发式，存在误报可能（如 AI 引用上一轮已完成的动作），故只做软提醒，不阻断流程。
-     */
-    private void detectAndFlagPossibleHallucination() {
-        ChatMessage lastAssistant = null;
-        for (int i = history.size() - 1; i >= 0; i--) {
-            ChatMessage msg = history.get(i);
-            if (msg.isAssistantMessage()) {
-                lastAssistant = msg;
-                break;
-            }
-        }
-        if (lastAssistant == null || !containsCompletionClaim(lastAssistant.getContent())) {
-            return;
-        }
-
-        context.getUi().displayWarning("⚠️ 检测到 AI 声称已完成操作，但本轮未执行任何工具，可能为幻觉，请核对结果");
-
-        ChatMessage flag = new ChatMessage("system",
-            "[系统提示] 上一条 AI 回复声称完成了操作，但实际未触发任何工具调用，该回复可能是幻觉。请向用户如实说明并重新执行操作。");
-        history.add(flag);
-    }
-
-    /** 判断文本是否包含「完成操作」类断言 */
-    private boolean containsCompletionClaim(String content) {
-        if (content == null || content.isEmpty()) {
-            return false;
-        }
-        String lower = content.toLowerCase();
-        for (String claim : COMPLETION_CLAIMS) {
-            if (lower.contains(claim)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 🔥 在 AI 响应完成后执行待处理的工具调用
-     */
-    public void executePendingToolCall() {
-        if (pendingToolCall == null) {
-            return;
-        }
-
-        try {
-            // 非流式触发的工具调用，需要显示完整的确认框
-            ToolExecution execution = new ToolExecution(
-                pendingToolCall.getToolName(),
-                pendingToolCall.getDescription() != null ? pendingToolCall.getDescription() : "执行工具操作",
-                pendingToolCall.getParameters(),
-                true
-            );
-
-            // 🔥 使用新的智能 3 选项确认系统
-            ToolExecutionConfirmation.ActionType action = confirmation.askConfirmationWithOptions(execution);
-
-            // 提取文件名用于总结
-            String fileName = extractFileName(pendingToolCall);
-
-            switch (action) {
-                case CREATE_ONLY:
-                    // 用户选择：执行操作
-                    boolean success = executeToolCall(pendingToolCall);
-                    // 🔥 只有执行成功时才显示成功总结
-                    if (success) {
-                        displayOperationSummary(pendingToolCall, action);
-                    }
-                    break;
-
-                case CREATE_AND_RUN:
-                    // 用户选择：执行并运行/查看详情
-                    boolean executed = executeToolCall(pendingToolCall);
-
-                    // 只有执行成功时才继续
-                    if (executed) {
-                        // 根据工具类型执行额外操作
-                        if (pendingToolCall.getToolName().equals("write_file")) {
-                            // 自动执行编译和运行
-                            executeCompileAndRun(pendingToolCall);
-                        } else {
-                            // 其他工具：显示详情
-                            displayOperationSummary(pendingToolCall, action);
-                        }
-                    }
-                    break;
-
-                case DISCARD:
-                    // 用户选择：丢弃
-                    context.getUi().displayWarning("⏭️  操作已取消");
-                    // 🔥 根据工具类型显示取消总结
-                    displayCancelSummary(pendingToolCall);
-                    break;
-            }
-        } finally {
-            // 清空待处理的工具调用
-            pendingToolCall = null;
+            Map<String, Object> args = OBJECT_MAPPER.readValue(argsJson, Map.class);
+            return switch (request.name()) {
+                case "code_executor" -> args.get("language") + " " + args.get("code");
+                case "grep_search" -> args.get("pattern") + " " + args.get("path");
+                case "codebase_search" -> String.valueOf(args.get("query"));
+                default -> argsJson;
+            };
+        } catch (Exception e) {
+            return argsJson;
         }
     }
 
