@@ -10,11 +10,15 @@ import java.io.InputStreamReader;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 命令执行工具，允许执行预定义的系统命令
  */
 public class CommandExecutorTool extends BaseTool {
+    /** 命令执行超时时间（秒），超时后强制终止进程 */
+    private static final long COMMAND_TIMEOUT_SECONDS = 30;
+
     private final Set<String> allowedCommands;
     private final AppConfig appConfig;
 
@@ -70,6 +74,12 @@ public class CommandExecutorTool extends BaseTool {
                 }
             }
 
+            // 安全检查：命令经 shell 执行，必须先拦截 shell 操作符，防止绕过白名单
+            if (containsShellOperator(command)) {
+                return error("命令包含不安全的 shell 操作符，仅支持单条简单命令",
+                        System.currentTimeMillis() - startTime);
+            }
+
             String[] commandParts = command.split("\\s+");
             String baseCommand = commandParts[0].toLowerCase();
 
@@ -103,8 +113,16 @@ public class CommandExecutorTool extends BaseTool {
                 Thread outThread = readStreamAsync(process.getInputStream(), stdout);
                 Thread errThread = readStreamAsync(process.getErrorStream(), stderr);
 
-                // 等待进程完成
-                int exitCode = process.waitFor();
+                // 等待进程完成，带超时防止挂起命令卡死程序
+                if (!process.waitFor(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                    process.destroyForcibly();
+                    // 进程被强杀后流会关闭，读线程的 readLine 返回 null 自然退出
+                    outThread.join();
+                    errThread.join();
+                    return error("命令执行超时（30s），已强制终止",
+                            System.currentTimeMillis() - startTime);
+                }
+                int exitCode = process.exitValue();
                 outThread.join();
                 errThread.join();
 
@@ -127,6 +145,20 @@ public class CommandExecutorTool extends BaseTool {
 
     private boolean isCommandAllowed(String command) {
         return allowedCommands.contains(command.toLowerCase());
+    }
+
+    /**
+     * 检测命令中是否包含 shell 操作符/命令替换。
+     * 命令通过 shell 执行，若放行这些符号，白名单即可被 "echo hi && rm -rf /" 之类绕过。
+     */
+    private boolean containsShellOperator(String command) {
+        String[] operators = {"&&", "||", ";", "|", ">", "<", "`", "$("};
+        for (String op : operators) {
+            if (command.contains(op)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 异步读取流到 StringBuilder，返回读线程（用于并发读取 stdout/stderr 避免死锁） */
