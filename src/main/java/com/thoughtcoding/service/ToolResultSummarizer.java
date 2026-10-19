@@ -1,5 +1,6 @@
 package com.thoughtcoding.service;
 
+import com.thoughtcoding.model.ToolResult;
 import com.thoughtcoding.util.FileUtils;
 
 import java.io.File;
@@ -7,22 +8,15 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
- * 工具输出源头压缩器
- * 在工具结果写入对话历史之前做压缩，避免无用信息占用上下文窗口。
+ * 工具输出压缩器（基于结构化字段，无损可恢复）。
  *
- * 策略（无损可恢复）：
- * 1. 超长输出先落盘保留完整原文（不永久丢信息）
- * 2. 结构化提取高信号行（按日志严重级别 / 异常堆栈 / 退出码等形态，替代裸关键词白名单）
- * 3. 头尾保留 + 恢复路径标记，模型需要时可回读完整结果
+ * 策略：
+ * 1. 失败时优先保留 stderr / error（结构化字段，不再靠正则猜「高信号行」）
+ * 2. 超长输出落盘保留完整原文，写回头尾预览 + 恢复路径标记，模型可回读
  */
 public class ToolResultSummarizer {
 
@@ -37,85 +31,50 @@ public class ToolResultSummarizer {
 
     private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS");
 
-    // ── 结构化高信号模式（方案B）──
-    // 严重级别：大写 ERROR/FATAL/SEVERE/CRITICAL，避免匹配小写 prose 里的 "error"
-    private static final Pattern SEVERITY = Pattern.compile("\\b(ERROR|FATAL|SEVERE|CRITICAL)\\b");
-    // 异常类名：XxxException / XxxError
-    private static final Pattern EXCEPTION = Pattern.compile("\\b([\\w.]*(Exception|Error))\\b");
-    // 堆栈行 / 追溯
-    private static final Pattern STACK_TRACE = Pattern.compile(
-            "(?i)(^\\s*at\\s+[\\w.$<>]+\\([^)]*\\)|^Caused by:|^\\s*Traceback|^\\s*File\\s+\".+\",\\s+line\\s+\\d+)");
-    // 退出码 / 构建失败
-    private static final Pattern EXIT_FAIL = Pattern.compile(
-            "(?i)(exit\\s+code\\s*[1-9]|exit\\s+status\\s*[1-9]|build\\s+failed)");
+    /** 基于结构化 ToolResult 压缩：失败优先 stderr，成功压缩 stdout */
+    public static String summarize(ToolResult result, String toolName) {
+        String text;
+        if (result.isSuccess()) {
+            text = result.getOutput();
+        } else {
+            String stderr = result.getStderr();
+            text = (stderr != null && !stderr.isEmpty()) ? stderr : result.getError();
+        }
+        return summarizeText(text, toolName);
+    }
 
-    /**
-     * 对工具输出做无损压缩。短输出原样返回；超长输出落盘全文，返回头尾预览 + 高信号行 + 恢复路径。
-     *
-     * @param rawOutput 工具原始输出
-     * @param toolName  工具名（用于落盘文件命名）
-     * @return 压缩后文本
-     */
+    /** 纯文本压缩（向后兼容，供测试与直接文本使用） */
     public static String summarize(String rawOutput, String toolName) {
-        if (rawOutput == null || rawOutput.isEmpty()) {
-            return rawOutput;
+        return summarizeText(rawOutput, toolName);
+    }
+
+    private static String summarizeText(String text, String toolName) {
+        if (text == null || text.isEmpty()) {
+            return text == null ? "" : text;
         }
 
-        String[] lines = rawOutput.split("\n");
+        String[] lines = text.split("\n");
         if (lines.length <= MAX_OUTPUT_LINES) {
-            return rawOutput;
+            return text;
         }
 
-        // 1. 落盘完整原文（方案A）
-        String artifactPath = offload(rawOutput, toolName);
+        // 1. 落盘完整原文（无损可恢复）
+        String artifactPath = offload(text, toolName);
 
-        // 2. 结构化提取高信号行（方案B）
-        List<String> signalLines = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (String line : lines) {
-            if (isHighSignal(line) && seen.add(line)) {
-                signalLines.add(truncateLine(line));
-            }
-        }
-
-        // 3. 头尾保留
-        List<String> head = new ArrayList<>();
-        for (int i = 0; i < Math.min(HEAD_LINES, lines.length); i++) {
-            head.add(truncateLine(lines[i]));
-        }
-        List<String> tail = new ArrayList<>();
-        int tailStart = Math.max(HEAD_LINES, lines.length - TAIL_LINES);
-        for (int i = tailStart; i < lines.length; i++) {
-            tail.add(truncateLine(lines[i]));
-        }
-
-        // 4. 组装
+        // 2. 头尾保留
         StringBuilder sb = new StringBuilder();
-        for (String h : head) {
-            sb.append(h).append('\n');
-        }
-        if (!signalLines.isEmpty()) {
-            sb.append("... [关键信息 ").append(signalLines.size()).append(" 条] ...\n");
-            for (String s : signalLines) {
-                sb.append(s).append('\n');
-            }
+        for (int i = 0; i < Math.min(HEAD_LINES, lines.length); i++) {
+            sb.append(truncateLine(lines[i])).append('\n');
         }
         int omitted = Math.max(0, lines.length - HEAD_LINES - TAIL_LINES);
         sb.append("... [省略 ").append(omitted).append(" 行] ...\n");
-        for (String t : tail) {
-            sb.append(t).append('\n');
+        int tailStart = Math.max(HEAD_LINES, lines.length - TAIL_LINES);
+        for (int i = tailStart; i < lines.length; i++) {
+            sb.append(truncateLine(lines[i])).append('\n');
         }
         sb.append("[完整输出 ").append(lines.length).append(" 行已保存至 ")
           .append(artifactPath).append("，需要时用 ⏺ Read(").append(artifactPath).append(") 查看]");
         return sb.toString();
-    }
-
-    /** 判断单行是否为高信号（结构化模式） */
-    private static boolean isHighSignal(String line) {
-        return SEVERITY.matcher(line).find()
-                || EXCEPTION.matcher(line).find()
-                || STACK_TRACE.matcher(line).find()
-                || EXIT_FAIL.matcher(line).find();
     }
 
     /** 落盘完整原文，返回文件路径；失败时降级返回占位说明 */

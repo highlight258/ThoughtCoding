@@ -5,6 +5,7 @@ import com.thoughtcoding.tools.BaseTool;
 import com.thoughtcoding.model.ToolResult;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -92,30 +93,27 @@ public class CommandExecutorTool extends BaseTool {
             // 🔥 设置工作目录为当前目录（作为默认路径）
             // 但命令中可以使用绝对路径访问其他目录
             processBuilder.directory(new java.io.File(System.getProperty("user.dir")));
-            processBuilder.redirectErrorStream(true);
+            processBuilder.redirectErrorStream(false);
 
             Process process = processBuilder.start();
             try {
-                // 读取输出
-                StringBuilder output = new StringBuilder();
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        output.append(line).append("\n");
-                    }
-                }
+                // 并发读 stdout/stderr，避免缓冲区满死锁
+                StringBuilder stdout = new StringBuilder();
+                StringBuilder stderr = new StringBuilder();
+                Thread outThread = readStreamAsync(process.getInputStream(), stdout);
+                Thread errThread = readStreamAsync(process.getErrorStream(), stderr);
 
                 // 等待进程完成
                 int exitCode = process.waitFor();
+                outThread.join();
+                errThread.join();
 
-                String result = output.toString().trim();
-                if (exitCode != 0) {
-                    return error("Command failed with exit code " + exitCode + ":\n" + result,
-                            System.currentTimeMillis() - startTime);
+                String out = stdout.toString().trim();
+                String err = stderr.toString().trim();
+                if (exitCode == 0 && out.isEmpty()) {
+                    out = "Command executed successfully (no output)";
                 }
-
-                return success(result.isEmpty() ? "Command executed successfully (no output)" : result,
-                        System.currentTimeMillis() - startTime);
+                return ToolResult.command(out, err, exitCode, System.currentTimeMillis() - startTime);
             } finally {
                 if (process.isAlive()) {
                     process.destroy();
@@ -129,6 +127,22 @@ public class CommandExecutorTool extends BaseTool {
 
     private boolean isCommandAllowed(String command) {
         return allowedCommands.contains(command.toLowerCase());
+    }
+
+    /** 异步读取流到 StringBuilder，返回读线程（用于并发读取 stdout/stderr 避免死锁） */
+    private Thread readStreamAsync(InputStream in, StringBuilder sb) {
+        Thread t = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append("\n");
+                }
+            } catch (Exception e) {
+                // 忽略流读取错误
+            }
+        });
+        t.start();
+        return t;
     }
 
     public Set<String> getAllowedCommands() {

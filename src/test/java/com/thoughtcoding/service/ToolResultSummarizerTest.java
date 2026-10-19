@@ -1,5 +1,6 @@
 package com.thoughtcoding.service;
 
+import com.thoughtcoding.model.ToolResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -34,19 +35,10 @@ public class ToolResultSummarizerTest {
     }
 
     @Test
-    void severityLineIsExtracted() {
-        ToolResultSummarizer.setStorageDir(tempDir.toString());
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 40; i++) {
-            sb.append("INFO normal ").append(i).append("\n");
-        }
-        sb.append("ERROR something broke\n");
-        for (int i = 0; i < 40; i++) {
-            sb.append("DEBUG trace ").append(i).append("\n");
-        }
+    void failedResultPrioritizesStderr() {
+        ToolResult result = ToolResult.command("正常输出 stdout", "错误详情 stderr", 1, 10);
+        String summary = ToolResultSummarizer.summarize(result, "test_tool");
 
-        String result = ToolResultSummarizer.summarize(sb.toString(), "test_tool");
-
-        assertTrue(result.contains("ERROR something broke"), "ERROR 行应被提取为高信号");
+        assertTrue(summary.contains("错误详情 stderr"), "失败结果应优先保留 stderr");
     }
 }

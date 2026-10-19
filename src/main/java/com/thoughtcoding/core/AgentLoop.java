@@ -144,10 +144,7 @@ public class AgentLoop {
         String toolInput = convertArgumentsToInput(request);
         ToolResult result = tool.execute(toolInput);
 
-        if (result.isSuccess()) {
-            return ToolResultSummarizer.summarize(result.getOutput(), request.name());
-        }
-        return "执行失败: " + result.getError();
+        return ToolResultSummarizer.summarize(result, request.name());
     }
 
     /**
