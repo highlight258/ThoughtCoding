@@ -29,8 +29,13 @@ public class MCPClient {
 
     private Thread errorMonitorThread;
     // 响应队列 + 独立读线程（替换 100ms 轮询）
-    private final BlockingQueue<String> responseQueue = new LinkedBlockingQueue<>();
+    // 有界队列：防止服务端异常刷屏时内存无限增长；满时读线程阻塞形成背压
+    private static final int RESPONSE_QUEUE_CAPACITY = 1024;
+    private final BlockingQueue<String> responseQueue = new LinkedBlockingQueue<>(RESPONSE_QUEUE_CAPACITY);
     private Thread readerThread;
+
+    // 进程启动等待上限（轮询存活状态，秒退时快速失败）
+    private static final long STARTUP_WAIT_MS = 2000L;
 
     private boolean initialized = false;
     private final String serverName;
@@ -84,14 +89,20 @@ public class MCPClient {
             // 🔥 启动独立读线程，持续把服务端 stdout 读入响应队列
             startReaderThread();
 
-            // 等待进程启动
-            log.debug("⏳ 等待 MCP 服务器启动...");
-            Thread.sleep(2000);
-
-            if (!process.isAlive()) {
-                int exitCode = process.exitValue();
-                log.error("❌ MCP服务器进程退出，退出码: {}", exitCode);
-                return false;
+            // 等待进程启动：轮询存活状态，进程秒退时快速失败（而非固定 sleep 2s）
+            long startupDeadline = System.currentTimeMillis() + STARTUP_WAIT_MS;
+            while (System.currentTimeMillis() < startupDeadline) {
+                if (!process.isAlive()) {
+                    int exitCode = process.exitValue();
+                    log.error("❌ MCP服务器进程启动失败，退出码: {}", exitCode);
+                    return false;
+                }
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
             }
 
             log.debug("✅ MCP 进程已启动，开始协议初始化...");
@@ -152,8 +163,11 @@ public class MCPClient {
             try {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    responseQueue.offer(line);
+                    responseQueue.put(line);
                 }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.debug("MCP 读线程被中断: {}", serverName);
             } catch (Exception e) {
                 log.debug("MCP 读线程退出: {}", serverName);
             }
