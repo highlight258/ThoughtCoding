@@ -2,11 +2,14 @@ package com.thoughtcoding.service;
 
 import com.thoughtcoding.util.FileUtils;
 
+import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -27,6 +30,7 @@ public class ToolResultSummarizer {
     private static final int HEAD_LINES = 10;
     private static final int TAIL_LINES = 10;
     private static final int MAX_LINE_LENGTH = 500;
+    private static final int MAX_ARTIFACT_FILES = 100;
 
     // 落盘目录（默认 sessions/tool-results，测试可覆盖）
     private static volatile String storageDir = "sessions/tool-results";
@@ -121,9 +125,28 @@ public class ToolResultSummarizer {
         Path path = Paths.get(storageDir, name);
         try {
             FileUtils.writeFile(path, rawOutput);
+            cleanupOldArtifacts();
             return path.toString();
         } catch (Exception e) {
             return "<落盘失败: " + e.getMessage() + ">";
+        }
+    }
+
+    /** 按文件数量上限淘汰最旧的落盘产物，防止目录无限增长。清理失败不影响主流程。 */
+    private static void cleanupOldArtifacts() {
+        try {
+            File dir = new File(storageDir);
+            File[] files = dir.listFiles((d, name) -> name.endsWith(".txt"));
+            if (files == null || files.length <= MAX_ARTIFACT_FILES) {
+                return;
+            }
+            Arrays.sort(files, Comparator.comparingLong(File::lastModified));
+            int toDelete = files.length - MAX_ARTIFACT_FILES;
+            for (int i = 0; i < toDelete; i++) {
+                files[i].delete();
+            }
+        } catch (Exception e) {
+            // 忽略清理异常
         }
     }
 
