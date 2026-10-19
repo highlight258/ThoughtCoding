@@ -195,7 +195,7 @@ public class CodeChunker {
                 chunkStart = lineNum;
                 chunkBuf = new StringBuilder();
             } else if (funcM.find()) {
-                if (chunkBuf.length() > 0 && !"function".equals(currentType)) {
+                if (chunkBuf.length() > 0) {
                     chunks.add(new Chunk(filePath, chunkStart, lineNum - 1,
                             chunkBuf.toString().trim(), currentType, currentName));
                 }
