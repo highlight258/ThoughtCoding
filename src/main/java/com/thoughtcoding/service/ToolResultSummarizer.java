@@ -73,7 +73,7 @@ public class ToolResultSummarizer {
             sb.append(truncateLine(lines[i])).append('\n');
         }
         sb.append("[完整输出 ").append(lines.length).append(" 行已保存至 ")
-          .append(artifactPath).append("，需要时用 ⏺ Read(").append(artifactPath).append(") 查看]");
+          .append(artifactPath).append("，需要时调用文件读取工具读取该文件查看]");
         return sb.toString();
     }
 
