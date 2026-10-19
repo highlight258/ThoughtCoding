@@ -102,6 +102,14 @@ public class LangChainService implements AIService {
                     messages.add(ToolExecutionResultMessage.from(request2, result));
                 }
             }
+
+            // 达到轮次上限（非用户主动停止）：强制模型做一次无工具的总结收尾
+            if (!shouldStop) {
+                messages.add(SystemMessage.from(
+                        "你已达到工具调用轮数上限，请基于已有结果总结：已完成什么、卡在哪里、下一步建议什么。"));
+                AiMessage summary = generateSync(buildRequestMessages(), List.of());
+                messages.add(summary);
+            }
         } finally {
             isGenerating = false;
         }
@@ -144,6 +152,16 @@ public class LangChainService implements AIService {
             }
             result.add(0, msg);
             totalTokens += tokens;
+
+            // 工具结果消息：把紧邻的 assistant tool_calls 消息一起保留，避免拆散调用对
+            if (msg instanceof ToolExecutionResultMessage && i - 1 >= 0) {
+                dev.langchain4j.data.message.ChatMessage prev = history.get(i - 1);
+                if (prev instanceof AiMessage ai && ai.hasToolExecutionRequests()) {
+                    i--;
+                    result.add(0, prev);
+                    totalTokens += ContextManager.estimateTokens(prev.text());
+                }
+            }
         }
         return result;
     }
