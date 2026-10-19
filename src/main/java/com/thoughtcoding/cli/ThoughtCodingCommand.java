@@ -53,6 +53,9 @@ public class ThoughtCodingCommand implements Callable<Integer> {
     @CommandLine.Option(names = {"-m", "--model"}, description = "Specify model to use")
     private String model;
 
+    @CommandLine.Option(names = {"--auto-approve"}, description = "Skip tool execution confirmation")
+    private boolean autoApprove;
+
     @CommandLine.Option(names = {"--list-sessions"}, description = "List all sessions")
     private boolean listSessions;
 
@@ -166,6 +169,12 @@ public class ThoughtCodingCommand implements Callable<Integer> {
             错误处理：处理整个流程中的异常情况*/
             currentAgentLoop = new AgentLoop(context, currentSessionId, modelToUse);
             currentAgentLoop.loadHistory(history);
+
+            // 自动批准模式：跳过工具执行确认
+            if (autoApprove) {
+                currentAgentLoop.setAutoApprove(true);
+                ui.displayInfo("✅ 自动批准模式已开启（工具执行前不再确认）");
+            }
 
             // 单次对话模式
             if (prompt != null) {
