@@ -15,7 +15,10 @@ import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import dev.langchain4j.model.output.Response;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -31,6 +34,8 @@ import java.util.stream.Collectors;
  */
 public class LangChainService implements AIService {
     private static final int MAX_TOOL_ITERATIONS = 10;
+    private static final int CONTINUE_ROUNDS = 5;      // 用户选择继续时追加的轮数
+    private static final int REPETITION_WINDOW = 3;    // 重复检测窗口（连续 N 轮相同判定死循环）
 
     private final AppConfig appConfig;
     private final ToolRegistry toolRegistry;
@@ -42,6 +47,7 @@ public class LangChainService implements AIService {
 
     private volatile boolean isGenerating = false;
     private volatile boolean shouldStop = false;
+    private AIService.ContinueCallback continueCallback;
 
     public LangChainService(AppConfig appConfig, ToolRegistry toolRegistry, ContextManager contextManager) {
         this.appConfig = appConfig;
@@ -84,7 +90,11 @@ public class LangChainService implements AIService {
         try {
             messages.add(UserMessage.from(input));
 
-            for (int i = 0; i < MAX_TOOL_ITERATIONS && !shouldStop; i++) {
+            int maxRounds = MAX_TOOL_ITERATIONS;
+            int round = 0;
+            Deque<String> recentSignatures = new ArrayDeque<>();
+
+            while (round < maxRounds && !shouldStop) {
                 List<dev.langchain4j.data.message.ChatMessage> request = buildRequestMessages();
                 List<ToolSpecification> toolSpecs = ToolSpecificationBuilder.build(toolRegistry);
 
@@ -95,20 +105,35 @@ public class LangChainService implements AIService {
                     return;
                 }
 
+                // 重复检测：连续 N 轮调用完全相同的工具 → 死循环，提前结束
+                String signature = signatureOf(aiMessage);
+                recentSignatures.addLast(signature);
+                if (recentSignatures.size() > REPETITION_WINDOW) {
+                    recentSignatures.removeFirst();
+                }
+                if (recentSignatures.size() == REPETITION_WINDOW && allSame(recentSignatures)) {
+                    messages.add(AiMessage.from("检测到连续重复的工具调用，为避免死循环已提前停止。"));
+                    return;
+                }
+
                 // 模型请求工具：逐个执行，结果回传
                 for (ToolExecutionRequest request2 : aiMessage.toolExecutionRequests()) {
                     String result = toolExecutor.execute(request2);
                     messages.add(AiMessage.from(request2));
                     messages.add(ToolExecutionResultMessage.from(request2, result));
                 }
-            }
 
-            // 达到轮次上限（非用户主动停止）：强制模型做一次无工具的总结收尾
-            if (!shouldStop) {
-                messages.add(SystemMessage.from(
-                        "你已达到工具调用轮数上限，请基于已有结果总结：已完成什么、卡在哪里、下一步建议什么。"));
-                AiMessage summary = generateSync(buildRequestMessages(), List.of());
-                messages.add(summary);
+                round++;
+
+                // 到达上限：询问用户是否继续
+                if (round >= maxRounds && continueCallback != null) {
+                    if (continueCallback.shouldContinue(round)) {
+                        maxRounds += CONTINUE_ROUNDS;
+                    } else {
+                        messages.add(AiMessage.from("用户选择停止继续调用工具。"));
+                        return;
+                    }
+                }
             }
         } finally {
             isGenerating = false;
@@ -203,6 +228,30 @@ public class LangChainService implements AIService {
     @Override
     public void setMessageHandler(Consumer<ChatMessage> handler) {
         this.messageHandler = handler;
+    }
+
+    @Override
+    public void setContinueCallback(AIService.ContinueCallback callback) {
+        this.continueCallback = callback;
+    }
+
+    /** 生成本轮工具调用的签名（工具名 + 参数），用于重复检测 */
+    private String signatureOf(AiMessage aiMessage) {
+        return aiMessage.toolExecutionRequests().stream()
+                .map(r -> r.name() + ":" + r.arguments())
+                .collect(Collectors.joining("|"));
+    }
+
+    /** 判断签名队列是否全部相同（死循环检测） */
+    private boolean allSame(Deque<String> signatures) {
+        Iterator<String> it = signatures.iterator();
+        String first = it.next();
+        while (it.hasNext()) {
+            if (!first.equals(it.next())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

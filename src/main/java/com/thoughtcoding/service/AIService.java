@@ -35,9 +35,18 @@ public interface AIService {
     /** 从持久化历史恢复对话 */
     void loadConversation(List<ChatMessage> history);
 
+    /** 设置「是否继续」回调（到达工具调用上限时询问用户） */
+    void setContinueCallback(ContinueCallback callback);
+
     /** 工具执行器：执行一个工具调用请求，返回结果字符串 */
     @FunctionalInterface
     interface ToolExecutor {
         String execute(ToolExecutionRequest request);
+    }
+
+    /** 到达工具调用上限时询问用户是否继续 */
+    @FunctionalInterface
+    interface ContinueCallback {
+        boolean shouldContinue(int usedRounds);
     }
 }

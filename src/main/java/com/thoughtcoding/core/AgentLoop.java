@@ -44,6 +44,19 @@ public class AgentLoop {
 
         // 设置消息处理器（流式文本回调）
         context.getAiService().setMessageHandler(this::handleMessage);
+        // 设置「是否继续」回调（工具调用到上限时询问用户）
+        context.getAiService().setContinueCallback(this::askContinue);
+    }
+
+    /** 工具调用到达上限时询问用户是否继续 */
+    private boolean askContinue(int usedRounds) {
+        context.getUi().displayWarning("⚠️ 已达到工具调用上限（" + usedRounds + " 轮），是否继续？(y/n)");
+        try {
+            String answer = context.getUi().getLineReader().readLine("> ");
+            return answer != null && ("y".equalsIgnoreCase(answer.trim()) || "yes".equalsIgnoreCase(answer.trim()));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public void loadHistory(List<ChatMessage> previousHistory) {
