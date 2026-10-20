@@ -6,6 +6,7 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
 import dev.langchain4j.model.output.Response;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -17,6 +18,8 @@ import java.util.stream.Collectors;
 public class EmbeddingService {
     private static final String BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
     private static final String MODEL_NAME = "text-embedding-v3";
+    // DashScope 批量限制：每批最多 10 条
+    private static final int BATCH_SIZE = 10;
 
     private final EmbeddingModel model;
 
@@ -46,17 +49,22 @@ public class EmbeddingService {
         return response.content().vector();
     }
 
-    /** 批量文本转向量；禁用时返回空列表 */
+    /** 批量文本转向量；禁用时返回空列表。按 DashScope 每批 10 条限制分批调用。 */
     public List<float[]> embedAll(List<String> texts) {
         if (model == null) {
             return List.of();
         }
-        List<TextSegment> segments = texts.stream()
-                .map(TextSegment::from)
-                .collect(Collectors.toList());
-        Response<List<Embedding>> response = model.embedAll(segments);
-        return response.content().stream()
-                .map(Embedding::vector)
-                .collect(Collectors.toList());
+        List<float[]> result = new ArrayList<>();
+        for (int i = 0; i < texts.size(); i += BATCH_SIZE) {
+            int end = Math.min(i + BATCH_SIZE, texts.size());
+            List<TextSegment> segments = texts.subList(i, end).stream()
+                    .map(TextSegment::from)
+                    .collect(Collectors.toList());
+            Response<List<Embedding>> response = model.embedAll(segments);
+            for (Embedding emb : response.content()) {
+                result.add(emb.vector());
+            }
+        }
+        return result;
     }
 }

@@ -56,7 +56,7 @@ public class AccuracyTestRunner {
         TfidfVectorizer vectorizer = new TfidfVectorizer();
         VectorStore store = new VectorStore(projectRoot);
         CodeChunker chunker = new CodeChunker();
-        CodebaseIndexer indexer = new CodebaseIndexer(chunker, vectorizer, store);
+        CodebaseIndexer indexer = new CodebaseIndexer(chunker, vectorizer, store, new EmbeddingService(null));
         indexer.buildIndex(projectRoot);
         long buildMs = System.currentTimeMillis() - t0;
 
