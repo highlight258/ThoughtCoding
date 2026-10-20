@@ -10,6 +10,7 @@ import com.thoughtcoding.mcp.MCPToolManager;
 import com.thoughtcoding.rag.CodeChunker;
 import com.thoughtcoding.rag.CodebaseIndexer;
 import com.thoughtcoding.rag.CodebaseSearchTool;
+import com.thoughtcoding.rag.EmbeddingService;
 import com.thoughtcoding.rag.TfidfVectorizer;
 import com.thoughtcoding.rag.VectorStore;
 import com.thoughtcoding.service.AIService;
@@ -130,11 +131,13 @@ public class ThoughtCodingContext {
         CodeChunker chunker = new CodeChunker();
         TfidfVectorizer vectorizer = new TfidfVectorizer();
         VectorStore vectorStore = new VectorStore();
-        CodebaseIndexer codebaseIndexer = new CodebaseIndexer(chunker, vectorizer, vectorStore);
+        // embedding 服务（可选，未配置 DASHSCOPE_API_KEY 时禁用，混合检索退化纯 TF-IDF）
+        EmbeddingService embeddingService = new EmbeddingService(System.getenv("DASHSCOPE_API_KEY"));
+        CodebaseIndexer codebaseIndexer = new CodebaseIndexer(chunker, vectorizer, vectorStore, embeddingService);
 
         // 注册代码库搜索工具
         String projectRoot = System.getProperty("user.dir");
-        CodebaseSearchTool searchTool = new CodebaseSearchTool(appConfig, vectorStore, vectorizer, codebaseIndexer);
+        CodebaseSearchTool searchTool = new CodebaseSearchTool(appConfig, vectorStore, vectorizer, codebaseIndexer, embeddingService);
         toolRegistry.register(searchTool);
 
         // 异步构建/更新索引，不阻塞启动

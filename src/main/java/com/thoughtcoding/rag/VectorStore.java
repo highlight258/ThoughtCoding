@@ -28,6 +28,7 @@ public class VectorStore {
             String type,
             String name,
             List<Double> vector,
+            List<Float> embedding,
             long indexedAt
     ) {}
 

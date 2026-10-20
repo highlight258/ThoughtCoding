@@ -20,11 +20,13 @@ public class CodebaseIndexer {
     private final CodeChunker chunker;
     private final Vectorizer vectorizer;
     private final VectorStore store;
+    private final EmbeddingService embeddingService;
 
-    public CodebaseIndexer(CodeChunker chunker, Vectorizer vectorizer, VectorStore store) {
+    public CodebaseIndexer(CodeChunker chunker, Vectorizer vectorizer, VectorStore store, EmbeddingService embeddingService) {
         this.chunker = chunker;
         this.vectorizer = vectorizer;
         this.store = store;
+        this.embeddingService = embeddingService;
     }
 
     /**
@@ -52,6 +54,14 @@ public class CodebaseIndexer {
         List<double[]> vectors = vectorizer.encodeAll(texts);
         log.info("向量化完成，维度: {}", vectorizer.dimension());
 
+        // 3.5 embedding（语义向量，可选）
+        List<float[]> embeddings = embeddingService.isEnabled()
+                ? embeddingService.embedAll(texts)
+                : Collections.emptyList();
+        if (!embeddings.isEmpty()) {
+            log.info("embedding 完成，共 {} 条", embeddings.size());
+        }
+
         // 4. 构建索引条目
         List<VectorStore.IndexEntry> entries = new ArrayList<>();
         long now = System.currentTimeMillis();
@@ -67,6 +77,7 @@ public class CodebaseIndexer {
             for (double v : vec) {
                 vecList.add(v);
             }
+            List<Float> embList = i < embeddings.size() ? toFloatList(embeddings.get(i)) : null;
 
             entries.add(new VectorStore.IndexEntry(
                     UUID.randomUUID().toString().substring(0, 8),
@@ -77,6 +88,7 @@ public class CodebaseIndexer {
                     chunk.type(),
                     chunk.name(),
                     vecList,
+                    embList,
                     now
             ));
         }
@@ -120,11 +132,11 @@ public class CodebaseIndexer {
             entries = VectorStore.removeEntriesForFile(entries, file);
         }
 
-        // 重新索引变更文件
+        // 重新索引变更文件（先收集所有 chunk，批量 embedding）
         long now = System.currentTimeMillis();
         String projectRootAbs = Paths.get(projectRoot).toAbsolutePath().toString();
 
-        int added = 0;
+        List<CodeChunker.Chunk> newChunks = new ArrayList<>();
         for (String file : changed) {
             Path filePath = Paths.get(projectRoot, file);
             if (!Files.exists(filePath)) {
@@ -132,25 +144,34 @@ public class CodebaseIndexer {
             }
             try {
                 String content = Files.readString(filePath);
-                List<CodeChunker.Chunk> chunks = chunker.chunkFile(filePath.toString(), content);
-
-                for (CodeChunker.Chunk chunk : chunks) {
-                    double[] vec = vectorizer.encode(chunk.content());
-                    List<Double> vecList = new ArrayList<>();
-                    for (double v : vec) vecList.add(v);
-
-                    entries.add(new VectorStore.IndexEntry(
-                            UUID.randomUUID().toString().substring(0, 8),
-                            makeRelative(projectRootAbs, chunk.filePath()),
-                            chunk.startLine(), chunk.endLine(),
-                            chunk.content(), chunk.type(), chunk.name(),
-                            vecList, now
-                    ));
-                    added++;
-                }
+                newChunks.addAll(chunker.chunkFile(filePath.toString(), content));
             } catch (IOException e) {
                 log.warn("读取文件失败: {}", file, e);
             }
+        }
+
+        // 批量 embedding
+        List<String> newTexts = newChunks.stream().map(CodeChunker.Chunk::content).toList();
+        List<float[]> embeddings = embeddingService.isEnabled()
+                ? embeddingService.embedAll(newTexts)
+                : Collections.emptyList();
+
+        int added = 0;
+        for (int i = 0; i < newChunks.size(); i++) {
+            CodeChunker.Chunk chunk = newChunks.get(i);
+            double[] vec = vectorizer.encode(chunk.content());
+            List<Double> vecList = new ArrayList<>();
+            for (double v : vec) vecList.add(v);
+            List<Float> embList = i < embeddings.size() ? toFloatList(embeddings.get(i)) : null;
+
+            entries.add(new VectorStore.IndexEntry(
+                    UUID.randomUUID().toString().substring(0, 8),
+                    makeRelative(projectRootAbs, chunk.filePath()),
+                    chunk.startLine(), chunk.endLine(),
+                    chunk.content(), chunk.type(), chunk.name(),
+                    vecList, embList, now
+            ));
+            added++;
         }
 
         VectorStore.IndexData data = new VectorStore.IndexData(
@@ -278,6 +299,14 @@ public class CodebaseIndexer {
             return rel;
         }
         return absPath;
+    }
+
+    private List<Float> toFloatList(float[] vec) {
+        List<Float> list = new ArrayList<>(vec.length);
+        for (float v : vec) {
+            list.add(v);
+        }
+        return list;
     }
 
     /** 找出目录里有但索引里没有的新文件（相对路径） */
