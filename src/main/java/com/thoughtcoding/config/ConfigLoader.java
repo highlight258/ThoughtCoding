@@ -7,9 +7,12 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 配置加载器，负责从文件系统或类路径加载YAML配置文件
@@ -55,13 +58,16 @@ public class ConfigLoader {
             // 尝试从文件系统加载
             Path filePath = Paths.get(configPath);
             if (Files.exists(filePath)) {
-                return mapper.readValue(filePath.toFile(), AppConfig.class);
+                String content = resolveEnvVars(Files.readString(filePath));
+                return mapper.readValue(content, AppConfig.class);
             }
 
             // 尝试从类路径加载
             InputStream inputStream = getClass().getClassLoader().getResourceAsStream(configPath);
             if (inputStream != null) {
-                return mapper.readValue(inputStream, AppConfig.class);
+                String content = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+                content = resolveEnvVars(content);
+                return mapper.readValue(content, AppConfig.class);
             }
 
             // 加载默认配置
@@ -71,6 +77,20 @@ public class ConfigLoader {
             System.err.println("Failed to load configuration: " + e.getMessage());
             return createDefaultConfig();
         }
+    }
+
+    /** 展开 ${ENV_VAR} 占位符为环境变量值；环境变量未设置时保留原占位符 */
+    private String resolveEnvVars(String content) {
+        Matcher matcher = Pattern.compile("\\$\\{([^}]+)}").matcher(content);
+        StringBuffer sb = new StringBuffer();
+        while (matcher.find()) {
+            String envName = matcher.group(1);
+            String envValue = System.getenv(envName);
+            matcher.appendReplacement(sb, Matcher.quoteReplacement(
+                    envValue != null ? envValue : matcher.group(0)));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
     }
 
     private AppConfig createDefaultConfig() {
