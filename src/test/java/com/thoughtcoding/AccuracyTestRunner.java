@@ -35,11 +35,11 @@ public class AccuracyTestRunner {
         tc("余弦相似度搜索", "VectorStore.java", "B-关键词"),
 
         // C组: 方法/字段名 — 用户搜具体符号
-        tc("pendingToolCall", "AgentLoop.java", "C-符号"),
         tc("buildProjectContextMessage", "ContextManager.java", "C-符号"),
-        tc("streamingChat", "LangChainService.java", "C-符号"),
-        tc("detectShellInjection", "CommandExecutorTool.java", "C-符号"),
-        tc("attemptReconnect", "MCPService.java", "C-符号"),
+        tc("executeTool", "AgentLoop.java", "C-符号"),
+        tc("containsShellOperator", "CommandExecutorTool.java", "C-符号"),
+        tc("signatureOf", "LangChainService.java", "C-符号"),
+        tc("embed", "EmbeddingService.java", "C-符号"),
 
         // D组: 代码模式 — 用户搜 API 或模式
         tc("extends BaseTool", "CodebaseSearchTool.java", "D-模式"),

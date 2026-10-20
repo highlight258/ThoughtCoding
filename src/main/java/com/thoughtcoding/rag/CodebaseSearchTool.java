@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -76,14 +77,18 @@ public class CodebaseSearchTool extends BaseTool {
 
             vectorizer.setState(data.vectorizer);
 
-            // 1. TF-IDF 路（精确标识符命中）
+            // 1. TF-IDF 路（词面命中）
             List<VectorStore.SearchResult> tfidfResults = tfidfSearch(query, data);
 
             // 2. embedding 路（语义召回）
             List<VectorStore.SearchResult> embedResults = embeddingSearch(query, data);
 
-            // 3. RRF 融合
-            List<VectorStore.SearchResult> results = rrfFuse(tfidfResults, embedResults, DEFAULT_TOP_K);
+            // 3. 标识符整词精确匹配（类名/方法名/文件名）
+            List<VectorStore.SearchResult> exactResults = identifierMatch(query, data.chunks);
+
+            // 4. RRF 融合
+            List<VectorStore.SearchResult> results = rrfFuse(
+                    List.of(tfidfResults, embedResults, exactResults), DEFAULT_TOP_K);
 
             if (results.isEmpty()) {
                 return success("No relevant code found for query: " + query, elapsed(startTime));
@@ -134,21 +139,44 @@ public class CodebaseSearchTool extends BaseTool {
         return results;
     }
 
-    /** RRF 融合：score = Σ 1/(k + rank)，两路结果按 id 去重合并 */
+    /** RRF 融合：score = Σ 1/(k + rank)，多路结果按 id 去重合并 */
     private List<VectorStore.SearchResult> rrfFuse(
-            List<VectorStore.SearchResult> a,
-            List<VectorStore.SearchResult> b,
-            int k) {
+            List<List<VectorStore.SearchResult>> paths, int k) {
         Map<String, Double> fusedScores = new HashMap<>();
         Map<String, VectorStore.IndexEntry> idToEntry = new HashMap<>();
 
-        addRrfScores(a, fusedScores, idToEntry);
-        addRrfScores(b, fusedScores, idToEntry);
+        for (List<VectorStore.SearchResult> path : paths) {
+            addRrfScores(path, fusedScores, idToEntry);
+        }
 
         return fusedScores.entrySet().stream()
                 .sorted((x, y) -> Double.compare(y.getValue(), x.getValue()))
                 .limit(k)
                 .map(e -> new VectorStore.SearchResult(idToEntry.get(e.getKey()), e.getValue()))
+                .collect(Collectors.toList());
+    }
+
+    /** 标识符整词精确匹配：query 是单个标识符时，按 chunk 名或文件名精确命中 */
+    private List<VectorStore.SearchResult> identifierMatch(String query, List<VectorStore.IndexEntry> entries) {
+        if (query == null || !query.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+            return List.of();
+        }
+        String lower = query.toLowerCase();
+        Map<String, VectorStore.IndexEntry> matched = new LinkedHashMap<>();
+        for (VectorStore.IndexEntry entry : entries) {
+            boolean nameHit = entry.name() != null && entry.name().toLowerCase().equals(lower);
+            String filePath = entry.filePath();
+            int slash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'));
+            String base = slash >= 0 ? filePath.substring(slash + 1) : filePath;
+            int dot = base.lastIndexOf('.');
+            String stem = dot >= 0 ? base.substring(0, dot) : base;
+            boolean fileHit = stem.toLowerCase().equals(lower);
+            if (nameHit || fileHit) {
+                matched.putIfAbsent(entry.id(), entry);
+            }
+        }
+        return matched.values().stream()
+                .map(e -> new VectorStore.SearchResult(e, 1.0))
                 .collect(Collectors.toList());
     }
 
